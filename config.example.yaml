@@ -1,0 +1,5 @@
+ProxyAddr: 0.0.0.0:8888
+SshAddr: 1.1.1.1:22
+SshUser: user
+# SshPassword: 
+SshIdentityFile: /home/user/.ssh/id_rsa
