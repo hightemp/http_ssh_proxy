@@ -82,8 +82,10 @@ func (p *proxy) ServeHTTP(wr http.ResponseWriter, req *http.Request) {
 }
 
 func handleTunneling(w http.ResponseWriter, r *http.Request, dialer SSHDialer) {
+	log.Printf("Handling CONNECT method for %s", r.Host)
 	destConn, err := dialer.Dial("tcp", r.Host)
 	if err != nil {
+		log.Printf("Failed to connect to destination %s: %v", r.Host, err)
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
@@ -103,9 +105,11 @@ func handleTunneling(w http.ResponseWriter, r *http.Request, dialer SSHDialer) {
 
 	_, err = fmt.Fprint(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n")
 	if err != nil {
-		log.Printf("Failed to write to client: %v", err)
+		log.Printf("Failed to write HTTP 200 to client: %v", err)
 		return
 	}
+
+	log.Printf("Successfully established tunnel for %s", r.Host)
 
 	go transfer(destConn, clientConn)
 	go transfer(clientConn, destConn)
