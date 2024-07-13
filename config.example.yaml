@@ -1,5 +1,9 @@
-ProxyAddr: 0.0.0.0:8888
-SshAddr: 1.1.1.1:22
-SshUser: user
-# SshPassword: 
-SshIdentityFile: /home/user/.ssh/id_rsa
+listen_addr: 0.0.0.0:8888
+ssh_host: 192.168.1.1
+ssh_port: 22
+ssh_user: root
+# ssh_pass: 
+ssh_key_file: /home/user/.ssh/id_rsa
+proto: https
+pem_path: ./server.pem
+key_path: ./server.key

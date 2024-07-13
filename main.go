@@ -87,13 +87,19 @@ func handleHTTP(w http.ResponseWriter, req *http.Request) {
 
 	log.Printf("Successfully dialed destination %s over SSH", req.URL.Host)
 
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			log.Printf("DialContext called with network %s and addr %s", network, addr)
+			return conn, nil
+		},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+
 	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				log.Printf("DialContext called with network %s and addr %s", network, addr)
-				return conn, nil
-			},
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			log.Printf("Redirected to %s", req.URL.String())
+			return nil
 		},
 	}
 
