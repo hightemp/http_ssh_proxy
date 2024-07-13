@@ -1,143 +1,159 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
+	"time"
 
 	"golang.org/x/crypto/ssh"
-
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	ProxyAddr       string `yaml:"ProxyAddr"`
-	SshAddr         string `yaml:"SshAddr"`
-	SshUser         string `yaml:"SshUser"`
-	SshPassword     string `yaml:"SshPassword"`
-	SshIdentityFile string `yaml:"SshIdentityFile"`
+	ListenAddr string `yaml:"listen_addr"`
+	SSHHost    string `yaml:"ssh_host"`
+	SSHPort    int    `yaml:"ssh_port"`
+	SSHUser    string `yaml:"ssh_user"`
+	SSHPass    string `yaml:"ssh_pass"`
+	SSHKeyFile string `yaml:"ssh_key_file"`
 }
 
 var (
-	config Config
+	configFile string
+	config     Config
 )
 
-func LoadConfig(path string) error {
-	yamlFile, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("error reading YAML file: %v", err)
-	}
-
-	err = yaml.Unmarshal(yamlFile, &config)
-	if err != nil {
-		return fmt.Errorf("error parsing YAML file: %v", err)
-	}
-
-	return nil
-}
-
-func loadPrivateKey(filePath string) (ssh.AuthMethod, error) {
-	key, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, err
-	}
-
-	signer, err := ssh.ParsePrivateKey(key)
-	if err != nil {
-		return nil, err
-	}
-
-	return ssh.PublicKeys(signer), nil
+func init() {
+	flag.StringVar(&configFile, "config", "config.yaml", "Path to config file")
+	flag.Parse()
 }
 
 func main() {
-	argConfigPath := flag.String("config", "./config.yaml", "Config file path")
-
-	err := LoadConfig(*argConfigPath)
+	// Загрузка конфигурации
+	data, err := os.ReadFile(configFile)
 	if err != nil {
-		log.Fatalf("error: %s", err)
+		log.Fatalf("Error reading config file: %v", err)
 	}
 
-	var sshConfig *ssh.ClientConfig
+	err = yaml.Unmarshal(data, &config)
+	if err != nil {
+		log.Fatalf("Error parsing config file: %v", err)
+	}
 
-	if config.SshPassword != "" {
-		sshConfig = &ssh.ClientConfig{
-			User: config.SshUser,
-			Auth: []ssh.AuthMethod{
-				ssh.Password(config.SshPassword),
-			},
-			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		}
-	} else if config.SshIdentityFile != "" {
-		authMethod, err := loadPrivateKey(config.SshIdentityFile)
+	// Настройка SSH-клиента
+	sshConfig := &ssh.ClientConfig{
+		User:            config.SSHUser,
+		Auth:            []ssh.AuthMethod{},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         15 * time.Second,
+	}
+
+	if config.SSHPass != "" {
+		sshConfig.Auth = append(sshConfig.Auth, ssh.Password(config.SSHPass))
+	}
+
+	if config.SSHKeyFile != "" {
+		key, err := os.ReadFile(config.SSHKeyFile)
 		if err != nil {
-			log.Fatalf("Failed to load private key: %s", err)
+			log.Fatalf("Error reading SSH key file: %v", err)
 		}
-
-		sshConfig = &ssh.ClientConfig{
-			User: config.SshUser,
-			Auth: []ssh.AuthMethod{
-				authMethod,
-			},
-			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		signer, err := ssh.ParsePrivateKey(key)
+		if err != nil {
+			log.Fatalf("Error parsing SSH key: %v", err)
 		}
-	} else {
-		log.Fatal("auth option required")
+		sshConfig.Auth = append(sshConfig.Auth, ssh.PublicKeys(signer))
 	}
 
-	sshClient, err := ssh.Dial("tcp", config.SshAddr, sshConfig)
-	if err != nil {
-		log.Fatalf("Failed to dial SSH server: %v", err)
-	}
-	defer sshClient.Close()
-
+	// Настройка HTTP-прокси
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Received request: %s %s", r.Method, r.URL)
 		if r.Method == http.MethodConnect {
-			handleTunneling(w, r, sshClient)
+			handleTunneling(w, r, sshConfig)
 		} else {
-			handleHTTP(w, r, sshClient)
+			handleHTTP(w, r, sshConfig)
 		}
 	})
 
-	fmt.Printf("Starting proxy server on %s\n", config.ProxyAddr)
-	log.Fatal(http.ListenAndServe(config.ProxyAddr, nil))
+	log.Printf("Starting proxy server on %s", config.ListenAddr)
+	log.Fatal(http.ListenAndServe(config.ListenAddr, nil))
 }
 
-func handleTunneling(w http.ResponseWriter, r *http.Request, sshClient *ssh.Client) {
-	destConn, err := sshClient.Dial("tcp", r.Host)
+func handleTunneling(w http.ResponseWriter, r *http.Request, sshConfig *ssh.ClientConfig) {
+	log.Printf("Handling CONNECT request for: %s", r.Host)
+
+	destConn, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", config.SSHHost, config.SSHPort), sshConfig)
 	if err != nil {
+		log.Printf("Error connecting to SSH server: %v", err)
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+	defer destConn.Close()
+
+	targetConn, err := destConn.Dial("tcp", r.Host)
+	if err != nil {
+		log.Printf("Error dialing target host through SSH: %v", err)
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer targetConn.Close()
+
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
+		log.Printf("Hijacking not supported")
 		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
 		return
 	}
+
 	clientConn, _, err := hijacker.Hijack()
 	if err != nil {
+		log.Printf("Error hijacking connection: %v", err)
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	go transfer(destConn, clientConn)
-	go transfer(clientConn, destConn)
+	defer clientConn.Close()
+
+	log.Printf("Connection established, sending 200 OK")
+	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+
+	log.Printf("Starting to transfer data for: %s", r.Host)
+	go transfer(targetConn, clientConn)
+	transfer(clientConn, targetConn)
 }
 
-func transfer(destination io.WriteCloser, source io.ReadCloser) {
-	defer destination.Close()
-	defer source.Close()
-	io.Copy(destination, source)
-}
-
-func handleHTTP(w http.ResponseWriter, r *http.Request, sshClient *ssh.Client) {
-	resp, err := forwardRequest(r, sshClient)
+func handleHTTP(w http.ResponseWriter, r *http.Request, sshConfig *ssh.ClientConfig) {
+	log.Printf("Handling HTTP request for: %s", r.URL)
+	destConn, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", config.SSHHost, config.SSHPort), sshConfig)
 	if err != nil {
+		log.Printf("Error connecting to SSH server: %v", err)
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer destConn.Close()
+
+	targetConn, err := destConn.Dial("tcp", r.Host)
+	if err != nil {
+		log.Printf("Error dialing target host through SSH: %v", err)
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer targetConn.Close()
+
+	r.RequestURI = ""
+	if err := r.Write(targetConn); err != nil {
+		log.Printf("Error writing request to target: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(targetConn), r)
+	if err != nil {
+		log.Printf("Error reading response from target: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
@@ -147,14 +163,10 @@ func handleHTTP(w http.ResponseWriter, r *http.Request, sshClient *ssh.Client) {
 	io.Copy(w, resp.Body)
 }
 
-func forwardRequest(r *http.Request, sshClient *ssh.Client) (*http.Response, error) {
-	transport := &http.Transport{
-		Dial: func(network, addr string) (net.Conn, error) {
-			return sshClient.Dial(network, addr)
-		},
-	}
-	client := &http.Client{Transport: transport}
-	return client.Do(r)
+func transfer(destination io.WriteCloser, source io.ReadCloser) {
+	defer destination.Close()
+	defer source.Close()
+	io.Copy(destination, source)
 }
 
 func copyHeader(dst, src http.Header) {
