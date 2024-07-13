@@ -1,4 +1,4 @@
-# HTTP SSH Proxy
+# http_ssh_proxy
 
 This project is a simple HTTP proxy with SSH tunneling support. The proxy server intercepts HTTP and HTTPS requests and tunnels them to the desired destination over an SSH connection, providing enhanced security for your network communications.
 
