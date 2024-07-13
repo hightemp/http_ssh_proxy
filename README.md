@@ -61,3 +61,5 @@ The proxy server should now be running and listening on the address specified in
 ## License
 
 This project is open-source and available under the MIT License.
+
+[![](https://asdertasd.site/counter/http_ssh_proxy?a=1)](https://asdertasd.site/counter/http_ssh_proxy)
