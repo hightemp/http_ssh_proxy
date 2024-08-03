@@ -1,8 +1,6 @@
 package main
 
 import (
-	"context"
-	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
@@ -10,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -73,60 +72,42 @@ func transfer(destination io.WriteCloser, source io.ReadCloser) {
 }
 
 func handleHTTP(w http.ResponseWriter, req *http.Request) {
-	log.Printf("Handling HTTP request to %s", req.URL.Host)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	host := req.Host
+	if !strings.Contains(host, ":") {
+		if req.TLS == nil {
+			host += ":80"
+		} else {
+			host += ":443"
+		}
+	}
+	log.Printf("Handling HTTP request to %s", host)
 
-	conn, err := sshClient.Dial("tcp", req.URL.Host)
+	// Устанавливаем соединение через SSH туннель
+	destConn, err := sshClient.Dial("tcp", host)
 	if err != nil {
 		log.Printf("Failed to dial destination over SSH: %v", err)
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	defer conn.Close()
 
-	log.Printf("Successfully dialed destination %s over SSH", req.URL.Host)
-
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			log.Printf("DialContext called with network %s and addr %s", network, addr)
-			return conn, nil
-		},
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		log.Printf("Hijacking not supported")
+		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+		return
 	}
 
-	client := &http.Client{
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			log.Printf("Redirected to %s", req.URL.String())
-			return nil
-		},
-	}
-
-	resp, err := client.Do(req.WithContext(ctx))
+	clientConn, _, err := hijacker.Hijack()
 	if err != nil {
-		log.Printf("HTTP request failed: %v", err)
+		log.Printf("Failed to hijack connection: %v", err)
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	defer resp.Body.Close()
 
-	log.Printf("Successfully got response from destination %s", req.URL.Host)
-	copyHeader(w.Header(), resp.Header)
-	w.WriteHeader(resp.StatusCode)
-	_, err = io.Copy(w, resp.Body)
-	if err != nil {
-		log.Printf("Error copying response body: %v", err)
-	}
-}
+	log.Printf("Successfully hijacked connection and established SSH tunnel to %s", req.Host)
 
-func copyHeader(dst, src http.Header) {
-	for k, vv := range src {
-		for _, v := range vv {
-			dst.Add(k, v)
-		}
-	}
-	log.Printf("Headers copied from src to dst: %v", dst)
+	go transfer(destConn, clientConn)
+	go transfer(clientConn, destConn)
 }
 
 func loadConfig(path string) (*Config, error) {
