@@ -57,7 +57,7 @@ func main() {
 		Addr: config.ProxyAddr,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			log.Println("Received request:", r.Method, r.URL)
-			if !basicAuth(w, r) {
+			if config.Username != "" && !basicAuth(w, r) {
 				return
 			}
 			handleTunneling(w, r)
