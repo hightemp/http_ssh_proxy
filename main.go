@@ -37,6 +37,8 @@ func main() {
 	configPath := flag.String("config", "config.yaml", "Path to the config file")
 	flag.Parse()
 
+	log.Printf("Trying to read config file %s\n", *configPath)
+
 	content, err := os.ReadFile(*configPath)
 	if err != nil {
 		log.Fatalf("Error reading config file: %v", err)

@@ -5,34 +5,49 @@ SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 CONFIG_FILE="/etc/$SERVICE_NAME/config.yaml"
 BINARY_PATH="/usr/local/bin/$SERVICE_NAME"
 
+if [ ! -f "config.yaml" ]; then
+    echo "Error: config.yaml not found"
+    exit 1
+fi
+
 sudo systemctl stop $SERVICE_NAME
 
 sudo mkdir -p /etc/$SERVICE_NAME
 
-sudo cp config.yaml $CONFIG_FILE
-sudo chown $USER:$USER $CONFIG_FILE
+U=$USER
 
-cat <<EOL > $SERVICE_FILE
+sudo cp $SERVICE_NAME $BINARY_PATH
+
+sudo cp config.yaml $CONFIG_FILE
+sudo chown $U:$U $CONFIG_FILE
+
+sudo bash -c "cat <<EOL > $SERVICE_FILE
 [Unit]
 Description=HTTP SSH Proxy Service
 After=network.target
 
 [Service]
-Type=$USER
-User=$USER
-ExecStart=$BINARY_PATH
+Type=simple
+User=$U
+Group=$U
+ExecStart=$BINARY_PATH -config $CONFIG_FILE
 Restart=always
-Environment=CONFIG_PATH=$CONFIG_FILE
 
 [Install]
 WantedBy=multi-user.target
-EOL
+EOL"
 
-systemctl daemon-reload
+sudo systemctl daemon-reload
 
-systemctl enable $SERVICE_NAME
-systemctl start $SERVICE_NAME
+sudo systemctl enable $SERVICE_NAME
+
+sudo chown $U:$U $SERVICE_FILE
+sudo chmod a+x $SERVICE_FILE
+
+ls -laht $SERVICE_FILE
+
+sudo systemctl start $SERVICE_NAME
 
 echo "Service $SERVICE_NAME installed and started."
 
-systemctl status $SERVICE_NAME
+sudo systemctl status $SERVICE_NAME
