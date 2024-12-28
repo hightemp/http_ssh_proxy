@@ -188,8 +188,8 @@ func transfer(destination io.WriteCloser, source io.ReadCloser) {
 	defer source.Close()
 	bytes, err := io.Copy(destination, source)
 	if err != nil {
-		if err, ok := err.(*ssh.ExitError); ok {
-			log.Printf("SSH exit error: %v\n", err)
+		if exitErr, ok := err.(*ssh.ExitError); ok {
+			log.Printf("SSH exit error: %v\n", exitErr)
 		} else {
 			log.Printf("Transfer error: %v\n", err)
 		}
