@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -152,12 +153,14 @@ func basicAuth(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func handleTunneling(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodConnect {
-		log.Printf("Error: Method not allowed: %s\n", r.Method)
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
+	if r.Method == http.MethodConnect {
+		handleConnect(w, r)
+	} else {
+		handleHTTP(w, r)
 	}
+}
 
+func handleConnect(w http.ResponseWriter, r *http.Request) {
 	destConn, err := sshClient.Dial("tcp", r.Host)
 	if err != nil {
 		log.Printf("Error: Can't connect to host through SSH tunnel: %s, %v\n", r.Host, err)
@@ -181,6 +184,47 @@ func handleTunneling(w http.ResponseWriter, r *http.Request) {
 
 	go transfer(destConn, clientConn)
 	go transfer(clientConn, destConn)
+}
+
+func handleHTTP(w http.ResponseWriter, r *http.Request) {
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			Dial: func(network, addr string) (net.Conn, error) {
+				return sshClient.Dial(network, addr)
+			},
+		},
+	}
+
+	outReq, err := http.NewRequest(r.Method, r.URL.String(), r.Body)
+	if err != nil {
+		log.Printf("Error creating request: %v\n", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	for key, values := range r.Header {
+		if key != "Proxy-Authorization" && key != "Proxy-Connection" {
+			outReq.Header[key] = values
+		}
+	}
+
+	resp, err := httpClient.Do(outReq)
+	if err != nil {
+		log.Printf("Error forwarding request: %v\n", err)
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
+
+	for key, values := range resp.Header {
+		w.Header()[key] = values
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	_, err = io.Copy(w, resp.Body)
+	if err != nil {
+		log.Printf("Error copying response: %v\n", err)
+	}
 }
 
 func transfer(destination io.WriteCloser, source io.ReadCloser) {
