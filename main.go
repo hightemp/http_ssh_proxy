@@ -69,7 +69,22 @@ func main() {
 
 	log.Printf("Starting proxy server on %s\n", config.ProxyAddr)
 	if config.Proto == "https" {
-		log.Fatal(server.ListenAndServeTLS(config.CertPath, config.KeyPath))
+		cert, err := tls.LoadX509KeyPair(config.CertPath, config.KeyPath)
+		if err != nil {
+			log.Fatalf("Error loading TLS certificate: %v", err)
+		}
+
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}
+
+		listener, err := tls.Listen("tcp", config.ProxyAddr, tlsConfig)
+		if err != nil {
+			log.Fatalf("Error creating TLS listener: %v", err)
+		}
+		defer listener.Close()
+
+		log.Fatal(server.Serve(listener))
 	} else {
 		log.Fatal(server.ListenAndServe())
 	}
