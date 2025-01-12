@@ -143,12 +143,13 @@ func basicAuth(w http.ResponseWriter, r *http.Request) bool {
 	}
 
 	if pair[0] != config.Username || pair[1] != config.Password {
-		log.Printf("Invalid credentials: %s:%s\n", pair[0], pair[1])
+		log.Printf("Failed authentication attempt from %s with credentials - username: %s, password: %s\n", r.RemoteAddr, pair[0], pair[1])
 		w.Header().Set("Proxy-Authenticate", `Basic realm="Proxy Authorization Required"`)
 		w.WriteHeader(http.StatusProxyAuthRequired)
 		return false
 	}
 
+	log.Printf("Successful authentication from %s with credentials - username: %s\n", r.RemoteAddr, pair[0])
 	return true
 }
 
