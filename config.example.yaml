@@ -1,4 +1,4 @@
-listen_addr: 0.0.0.0:8888
+listen_addr: 127.0.0.1:8888
 username: test
 password: test
 ssh_host: 192.168.1.1

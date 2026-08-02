@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -48,6 +49,10 @@ type SSHManager struct {
 
 var config Config
 var requestCounter uint64
+
+type proxyDialer interface {
+	Dial(network, addr string) (net.Conn, error)
+}
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "Path to the config file")
@@ -231,6 +236,12 @@ func (m *SSHManager) Dial(network, addr string) (net.Conn, error) {
 
 	conn, err := client.Dial(network, addr)
 	if err != nil {
+		// OpenChannelError means that the SSH server is alive but could not reach
+		// this destination. Reconnecting the healthy SSH transport cannot help.
+		if isDestinationDialError(err) {
+			return nil, fmt.Errorf("SSH destination dial to %s failed: %w", addr, err)
+		}
+
 		// The SSH connection may have died — try to reconnect once
 		log.Printf("[SSH] Dial to %s failed (%v), attempting reconnect...", addr, err)
 		if reconnErr := m.reconnect(); reconnErr != nil {
@@ -246,6 +257,11 @@ func (m *SSHManager) Dial(network, addr string) (net.Conn, error) {
 		}
 	}
 	return conn, nil
+}
+
+func isDestinationDialError(err error) bool {
+	var openChannelErr *ssh.OpenChannelError
+	return errors.As(err, &openChannelErr)
 }
 
 func (m *SSHManager) keepAliveLoop() {
@@ -391,44 +407,55 @@ func basicAuth(w http.ResponseWriter, r *http.Request, reqID uint64) bool {
 
 // ===================== Proxy handlers =====================
 
-func handleTunneling(w http.ResponseWriter, r *http.Request, sshMgr *SSHManager, reqID uint64) {
+func handleTunneling(w http.ResponseWriter, r *http.Request, dialer proxyDialer, reqID uint64) {
 	if r.Method == http.MethodConnect {
-		handleConnect(w, r, sshMgr, reqID)
+		handleConnect(w, r, dialer, reqID)
 	} else {
-		handleHTTP(w, r, sshMgr, reqID)
+		handleHTTP(w, r, dialer, reqID)
 	}
 }
 
-func handleConnect(w http.ResponseWriter, r *http.Request, sshMgr *SSHManager, reqID uint64) {
-	destConn, err := sshMgr.Dial("tcp", r.Host)
+func handleConnect(w http.ResponseWriter, r *http.Request, dialer proxyDialer, reqID uint64) {
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		log.Printf("[REQ-%d] Hijacking not supported", reqID)
+		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+		return
+	}
+
+	destConn, err := dialer.Dial("tcp", r.Host)
 	if err != nil {
 		log.Printf("[REQ-%d] CONNECT dial to %s failed: %v", reqID, r.Host, err)
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		log.Printf("[REQ-%d] Hijacking not supported", reqID)
-		destConn.Close()
-		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
-		return
-	}
-	clientConn, _, err := hijacker.Hijack()
+	clientConn, bufferedClient, err := hijacker.Hijack()
 	if err != nil {
 		log.Printf("[REQ-%d] Hijack error: %v", reqID, err)
 		destConn.Close()
 		return
 	}
 
-	// Use a WaitGroup + done channel to close both sides when either transfer finishes
-	done := make(chan struct{})
+	// Write the CONNECT response directly after hijacking. Calling WriteHeader
+	// before Hijack makes net/http add "Transfer-Encoding: chunked", which is
+	// invalid for a successful CONNECT response and rejected by strict clients.
+	if _, err := bufferedClient.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		log.Printf("[REQ-%d] CONNECT response write failed: %v", reqID, err)
+		clientConn.Close()
+		destConn.Close()
+		return
+	}
+	if err := bufferedClient.Flush(); err != nil {
+		log.Printf("[REQ-%d] CONNECT response flush failed: %v", reqID, err)
+		clientConn.Close()
+		destConn.Close()
+		return
+	}
+
 	var once sync.Once
 	closeBoth := func() {
 		once.Do(func() {
-			close(done)
 			clientConn.Close()
 			destConn.Close()
 		})
@@ -436,7 +463,9 @@ func handleConnect(w http.ResponseWriter, r *http.Request, sshMgr *SSHManager, r
 
 	go func() {
 		defer closeBoth()
-		transfer(destConn, clientConn, reqID, "client->dest")
+		// Read through net/http's buffered reader so TLS bytes sent in the same
+		// packet as the CONNECT request are not discarded.
+		transfer(destConn, bufferedClient.Reader, reqID, "client->dest")
 	}()
 	go func() {
 		defer closeBoth()
@@ -444,12 +473,12 @@ func handleConnect(w http.ResponseWriter, r *http.Request, sshMgr *SSHManager, r
 	}()
 }
 
-func handleHTTP(w http.ResponseWriter, r *http.Request, sshMgr *SSHManager, reqID uint64) {
+func handleHTTP(w http.ResponseWriter, r *http.Request, dialer proxyDialer, reqID uint64) {
 	httpClient := &http.Client{
 		Timeout: 60 * time.Second,
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return sshMgr.Dial(network, addr)
+				return dialer.Dial(network, addr)
 			},
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
@@ -457,7 +486,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request, sshMgr *SSHManager, reqI
 		},
 	}
 
-	outReq, err := http.NewRequest(r.Method, r.URL.String(), r.Body)
+	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), r.Body)
 	if err != nil {
 		log.Printf("[REQ-%d] Error creating request: %v", reqID, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
