@@ -1,6 +1,8 @@
 # http_ssh_proxy
 
-This project is a simple HTTP proxy with SSH tunneling support. The proxy server intercepts HTTP and HTTPS requests and tunnels them to the desired destination over an SSH connection, providing enhanced security for your network communications.
+[![](https://asdertasd.site/counter/http_ssh_proxy)](https://asdertasd.site/counter/http_ssh_proxy)
+
+This project is a simple HTTP proxy with SSH tunneling support. HTTP requests and HTTPS `CONNECT` tunnels are forwarded through an SSH connection.
 
 ## Features
 
@@ -10,7 +12,7 @@ This project is a simple HTTP proxy with SSH tunneling support. The proxy server
 
 ## Prerequisites
 
-- Go (tested with Go 1.16 or later)
+- Go 1.22 or later
 - SSH server access
 - TLS certificates (if you plan to serve over HTTPS)
 
@@ -26,7 +28,7 @@ This project is a simple HTTP proxy with SSH tunneling support. The proxy server
 2. **Edit `config.yaml`**: Update the configuration file with your specific settings. Below are the required fields:
 
 ```yaml
-listen_addr: ":8080"       # Address to listen on
+listen_addr: "127.0.0.1:8888" # Keep the unauthenticated proxy local
 ssh_host: "your_ssh_host"  # SSH host
 ssh_port: 22               # SSH port
 ssh_user: "username"       # SSH user
@@ -58,8 +60,19 @@ If you need to generate your own TLS keys, you can use the provided script:
 
 The proxy server should now be running and listening on the address specified in the `config.yaml` file.
 
+Do not bind an unauthenticated proxy to `0.0.0.0`. If remote clients must use it, configure `username` and `password` and restrict access with a firewall.
+
+### Systemd installation
+
+The installer builds the current source, installs the binary and unit, then restarts the service:
+
+```bash
+./install_service.sh
+```
+
+An existing `/etc/http_ssh_proxy/config.yaml` is preserved during upgrades.
+The previous executable is retained as `/usr/local/bin/http_ssh_proxy.previous` for rollback.
+
 ## License
 
 This project is open-source and available under the MIT License.
-
-[![](https://asdertasd.site/counter/http_ssh_proxy?a=1)](https://asdertasd.site/counter/http_ssh_proxy)
