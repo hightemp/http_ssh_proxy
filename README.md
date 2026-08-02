@@ -1,5 +1,8 @@
 # http_ssh_proxy
 
+[![GitHub Downloads](https://img.shields.io/github/downloads/hightemp/http_ssh_proxy/total?logo=github&label=downloads)](https://github.com/hightemp/http_ssh_proxy/releases)
+[![GitHub Repo Size](https://img.shields.io/github/repo-size/hightemp/http_ssh_proxy?logo=github)](https://github.com/hightemp/http_ssh_proxy)
+
 [![](https://asdertasd.site/counter/http_ssh_proxy)](https://asdertasd.site/counter/http_ssh_proxy)
 
 This project is a simple HTTP proxy with SSH tunneling support. HTTP requests and HTTPS `CONNECT` tunnels are forwarded through an SSH connection.
