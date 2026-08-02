@@ -1,8 +1,10 @@
 # http_ssh_proxy
 
+[![Go Version](https://img.shields.io/github/go-mod/go-version/hightemp/http_ssh_proxy?logo=go)](https://github.com/hightemp/http_ssh_proxy/blob/main/go.mod)
+[![Go Report Card](https://goreportcard.com/badge/github.com/hightemp/http_ssh_proxy)](https://goreportcard.com/report/github.com/hightemp/http_ssh_proxy)
+[![Go Reference](https://pkg.go.dev/badge/github.com/hightemp/http_ssh_proxy.svg)](https://pkg.go.dev/github.com/hightemp/http_ssh_proxy)
 [![GitHub Downloads](https://img.shields.io/github/downloads/hightemp/http_ssh_proxy/total?logo=github&label=downloads)](https://github.com/hightemp/http_ssh_proxy/releases)
 [![GitHub Repo Size](https://img.shields.io/github/repo-size/hightemp/http_ssh_proxy?logo=github)](https://github.com/hightemp/http_ssh_proxy)
-
 [![](https://asdertasd.site/counter/http_ssh_proxy)](https://asdertasd.site/counter/http_ssh_proxy)
 
 This project is a simple HTTP proxy with SSH tunneling support. HTTP requests and HTTPS `CONNECT` tunnels are forwarded through an SSH connection.
