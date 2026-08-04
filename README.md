@@ -1,8 +1,7 @@
 # http_ssh_proxy
 
 [![Go Version](https://img.shields.io/github/go-mod/go-version/hightemp/http_ssh_proxy?logo=go)](https://github.com/hightemp/http_ssh_proxy/blob/main/go.mod)
-[![Go Report Card](https://goreportcard.com/badge/github.com/hightemp/http_ssh_proxy)](https://goreportcard.com/report/github.com/hightemp/http_ssh_proxy)
-[![Go Reference](https://pkg.go.dev/badge/github.com/hightemp/http_ssh_proxy.svg)](https://pkg.go.dev/github.com/hightemp/http_ssh_proxy)
+[![golangci-lint](https://github.com/hightemp/http_ssh_proxy/actions/workflows/golangci-lint.yml/badge.svg)](https://github.com/hightemp/http_ssh_proxy/actions/workflows/golangci-lint.yml)
 [![GitHub Downloads](https://img.shields.io/github/downloads/hightemp/http_ssh_proxy/total?logo=github&label=downloads)](https://github.com/hightemp/http_ssh_proxy/releases)
 [![](https://asdertasd.site/counter/http_ssh_proxy)](https://asdertasd.site/counter/http_ssh_proxy)
 
