@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify tag and version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [[ "${version}" == v* ]]; then
+            expected_tag="${version}"
+          else
+            expected_tag="v${version}"
+          fi
+          if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match VERSION (${expected_tag})" >&2
+            exit 1
+          fi
+
+      - name: Test
+        run: go test -race ./...
+
+      - name: Build release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist package
+          targets=(
+            "linux amd64"
+            "linux arm64"
+            "linux arm 7"
+            "windows amd64"
+            "windows arm64"
+            "darwin amd64"
+            "darwin arm64"
+          )
+
+          for target in "${targets[@]}"; do
+            read -r goos goarch goarm <<< "${target}"
+            arch_label="${goarch}"
+            binary_name="http_ssh_proxy"
+            build_env=(env CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}")
+
+            if [[ -n "${goarm:-}" ]]; then
+              arch_label="armv${goarm}"
+              build_env+=(GOARM="${goarm}")
+            fi
+            if [[ "${goos}" == "windows" ]]; then
+              binary_name+=".exe"
+            fi
+
+            package_name="http_ssh_proxy_${GITHUB_REF_NAME}_${goos}_${arch_label}"
+            package_dir="package/${package_name}"
+            mkdir -p "${package_dir}"
+
+            "${build_env[@]}" go build \
+              -trimpath \
+              -ldflags="-s -w" \
+              -o "${package_dir}/${binary_name}" \
+              .
+            cp README.md VERSION config.example.yaml "${package_dir}/"
+
+            if [[ "${goos}" == "windows" ]]; then
+              (
+                cd package
+                zip -qr "../dist/${package_name}.zip" "${package_name}"
+              )
+            else
+              tar -C package -czf "dist/${package_name}.tar.gz" "${package_name}"
+            fi
+
+            rm -rf -- "${package_dir}"
+          done
+
+          (
+            cd dist
+            sha256sum ./* > checksums.txt
+          )
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+            gh release edit "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}"
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --verify-tag \
+              --generate-notes \
+              --title "${GITHUB_REF_NAME}"
+          fi
