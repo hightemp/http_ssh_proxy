@@ -54,6 +54,12 @@ type proxyDialer interface {
 	Dial(network, addr string) (net.Conn, error)
 }
 
+func closeWithLog(name string, closer io.Closer) {
+	if err := closer.Close(); err != nil {
+		log.Printf("[CLOSE] Error closing %s: %v", name, err)
+	}
+}
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "Path to the config file")
 	flag.Parse()
@@ -129,7 +135,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("[FATAL] Error creating TLS listener: %v", err)
 		}
-		defer listener.Close()
+		defer closeWithLog("TLS listener", listener)
 
 		if err := server.Serve(listener); err != http.ErrServerClosed {
 			log.Fatalf("[FATAL] HTTPS server error: %v", err)
@@ -159,7 +165,7 @@ func (m *SSHManager) Connect() error {
 
 func (m *SSHManager) connectLocked() error {
 	if m.client != nil {
-		m.client.Close()
+		closeWithLog("previous SSH client", m.client)
 		m.client = nil
 	}
 
@@ -316,7 +322,7 @@ func (m *SSHManager) Close() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if m.client != nil {
-			m.client.Close()
+			closeWithLog("SSH client", m.client)
 			m.client = nil
 		}
 		log.Println("[SSH] Manager closed")
@@ -433,7 +439,7 @@ func handleConnect(w http.ResponseWriter, r *http.Request, dialer proxyDialer, r
 	clientConn, bufferedClient, err := hijacker.Hijack()
 	if err != nil {
 		log.Printf("[REQ-%d] Hijack error: %v", reqID, err)
-		destConn.Close()
+		closeWithLog(fmt.Sprintf("destination connection for request %d", reqID), destConn)
 		return
 	}
 
@@ -442,22 +448,22 @@ func handleConnect(w http.ResponseWriter, r *http.Request, dialer proxyDialer, r
 	// invalid for a successful CONNECT response and rejected by strict clients.
 	if _, err := bufferedClient.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		log.Printf("[REQ-%d] CONNECT response write failed: %v", reqID, err)
-		clientConn.Close()
-		destConn.Close()
+		closeWithLog(fmt.Sprintf("client connection for request %d", reqID), clientConn)
+		closeWithLog(fmt.Sprintf("destination connection for request %d", reqID), destConn)
 		return
 	}
 	if err := bufferedClient.Flush(); err != nil {
 		log.Printf("[REQ-%d] CONNECT response flush failed: %v", reqID, err)
-		clientConn.Close()
-		destConn.Close()
+		closeWithLog(fmt.Sprintf("client connection for request %d", reqID), clientConn)
+		closeWithLog(fmt.Sprintf("destination connection for request %d", reqID), destConn)
 		return
 	}
 
 	var once sync.Once
 	closeBoth := func() {
 		once.Do(func() {
-			clientConn.Close()
-			destConn.Close()
+			closeWithLog(fmt.Sprintf("client connection for request %d", reqID), clientConn)
+			closeWithLog(fmt.Sprintf("destination connection for request %d", reqID), destConn)
 		})
 	}
 
@@ -505,7 +511,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request, dialer proxyDialer, reqI
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	defer resp.Body.Close()
+	defer closeWithLog(fmt.Sprintf("response body for request %d", reqID), resp.Body)
 
 	for key, values := range resp.Header {
 		w.Header()[key] = values
