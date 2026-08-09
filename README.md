@@ -53,7 +53,12 @@ If you need to generate your own TLS keys, you can use the provided script:
 
 1. **Build the project**:
     ```bash
-    go build -o http_ssh_proxy
+    go build -o http_ssh_proxy ./cmd/http_ssh_proxy
+    ```
+
+    Alternatively, install the latest tagged version:
+    ```bash
+    go install github.com/hightemp/http_ssh_proxy/cmd/http_ssh_proxy@latest
     ```
 
 2. **Run the proxy**:
@@ -78,4 +83,4 @@ The previous executable is retained as `/usr/local/bin/http_ssh_proxy.previous` 
 
 ## License
 
-This project is open-source and available under the MIT License.
+This project is open-source and available under the [MIT License](LICENSE).

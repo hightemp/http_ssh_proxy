@@ -82,8 +82,8 @@ jobs:
               -trimpath \
               -ldflags="-s -w" \
               -o "${package_dir}/${binary_name}" \
-              .
-            cp README.md VERSION config.example.yaml "${package_dir}/"
+              ./cmd/http_ssh_proxy
+            cp README.md LICENSE VERSION config.example.yaml "${package_dir}/"
 
             if [[ "${goos}" == "windows" ]]; then
               (

@@ -27,7 +27,7 @@ fi
 echo "Building ${SERVICE_NAME}..."
 (
 	cd "${SCRIPT_DIR}"
-	go build -trimpath -o "${BUILD_DIR}/${SERVICE_NAME}" .
+	go build -trimpath -o "${BUILD_DIR}/${SERVICE_NAME}" ./cmd/http_ssh_proxy
 )
 
 sudo install -d -m 0755 "${CONFIG_DIR}"

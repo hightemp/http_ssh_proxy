@@ -10,10 +10,10 @@ BRANCH ?= main
 .PHONY: build build-static test release
 
 build:
-	$(GOBUILD) -o $(BINARY_NAME) -v
+	$(GOBUILD) -o $(BINARY_NAME) -v ./cmd/http_ssh_proxy
 
 build-static:
-	CGO_ENABLED=0 GOOS=linux $(GOBUILD) -a -installsuffix cgo -ldflags '-w' -o $(BINARY_NAME)_static .
+	CGO_ENABLED=0 GOOS=linux $(GOBUILD) -a -installsuffix cgo -ldflags '-w' -o $(BINARY_NAME)_static ./cmd/http_ssh_proxy
 
 test:
 	$(GO) test -race ./...

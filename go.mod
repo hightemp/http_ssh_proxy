@@ -1,4 +1,4 @@
-module http_ssh_proxy
+module github.com/hightemp/http_ssh_proxy
 
 go 1.22.4
 
