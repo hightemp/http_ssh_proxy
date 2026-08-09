@@ -1,15 +1,18 @@
 package sshmanager
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/hightemp/http_ssh_proxy/internal/config"
+	"github.com/hightemp/http_ssh_proxy/internal/logutil"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -50,7 +53,7 @@ func hostKeyCallback(cfg *config.Config) (ssh.HostKeyCallback, error) {
 	}
 }
 
-func dialSSH(cfg *config.Config) (*ssh.Client, error) {
+func dialSSH(ctx context.Context, cfg *config.Config) (*ssh.Client, error) {
 	verifyHostKey, err := hostKeyCallback(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("configure SSH host key verification: %w", err)
@@ -79,10 +82,46 @@ func dialSSH(cfg *config.Config) (*ssh.Client, error) {
 		Timeout:         10 * time.Second,
 	}
 
-	client, err := ssh.Dial("tcp", net.JoinHostPort(cfg.SSHHost, fmt.Sprintf("%d", cfg.SSHPort)), sshConfig)
+	address := net.JoinHostPort(cfg.SSHHost, fmt.Sprintf("%d", cfg.SSHPort))
+	netDialer := &net.Dialer{Timeout: sshConfig.Timeout}
+	conn, err := netDialer.DialContext(ctx, "tcp", address)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("dial SSH transport: %w", err)
+	}
+	closeOnCancel := context.AfterFunc(ctx, func() {
+		logutil.Close("canceled SSH transport", conn)
+	})
+	defer closeOnCancel()
+
+	deadline := time.Now().Add(sshConfig.Timeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return nil, closeAfterError(conn, fmt.Errorf("set SSH handshake deadline: %w", err))
 	}
 
-	return client, nil
+	clientConn, channels, requests, err := ssh.NewClientConn(conn, address, sshConfig)
+	if err != nil {
+		handshakeErr := fmt.Errorf("SSH handshake: %w", err)
+		if ctx.Err() != nil {
+			handshakeErr = fmt.Errorf("SSH handshake canceled: %w", ctx.Err())
+		}
+		return nil, closeAfterError(conn, handshakeErr)
+	}
+	if !closeOnCancel() && ctx.Err() != nil {
+		return nil, closeAfterError(clientConn, fmt.Errorf("SSH handshake canceled: %w", ctx.Err()))
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return nil, closeAfterError(clientConn, fmt.Errorf("clear SSH handshake deadline: %w", err))
+	}
+
+	return ssh.NewClient(clientConn, channels, requests), nil
+}
+
+func closeAfterError(closer io.Closer, operationErr error) error {
+	if closeErr := closer.Close(); closeErr != nil {
+		return errors.Join(operationErr, fmt.Errorf("close after failure: %w", closeErr))
+	}
+	return operationErr
 }

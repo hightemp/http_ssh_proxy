@@ -12,6 +12,8 @@ This project is a simple HTTP proxy with SSH tunneling support. HTTP requests an
 - **HTTP and HTTPS Support**: Handles regular HTTP requests and tunnels HTTPS requests using the CONNECT method.
 - **SSH Tunneling**: All requests are securely tunneled through an SSH connection.
 - **TLS Configuration**: Supports serving over HTTPS with configurable PEM and key paths.
+- **Graceful Shutdown**: Tracks HTTP requests and hijacked CONNECT tunnels, with bounded shutdown.
+- **Resource Limits**: Bounds SSH-forwarded connections and expires idle CONNECT tunnels.
 
 ## Prerequisites
 
@@ -37,11 +39,16 @@ username: ""                        # Set both username and password, or neither
 password: ""
 proto: "http"                       # http or https
 
+max_connections: 128                # Total concurrent SSH-forwarded connections
+tunnel_idle_timeout_seconds: 300     # Close inactive CONNECT tunnels
+shutdown_timeout_seconds: 15         # Graceful shutdown deadline
+
 ssh_host: "ssh.example.com"
 ssh_port: 22
 ssh_user: "proxy"
 ssh_pass: ""                        # Set ssh_pass, ssh_key_file, or both
 ssh_key_file: "/home/user/.ssh/id_ed25519"
+ssh_reconnect_attempts: 3            # Context-aware reconnect attempts
 ssh_known_hosts_file: "/home/user/.ssh/known_hosts" # Choose exactly one verifier
 # ssh_host_key_fingerprint: "SHA256:..."             # Alternative verifier
 
@@ -60,6 +67,13 @@ SSH authentication, unreadable key files, and invalid TLS certificate/key
 pairs. A non-loopback `listen_addr` is accepted only with HTTPS and both proxy
 credentials configured. This prevents accidentally exposing a plaintext open
 proxy; firewall restrictions are still recommended.
+
+Regular HTTP requests reuse one context-aware transport. Redirect responses are
+returned to the client unchanged, hop-by-hop headers are removed in both
+directions, and request cancellation interrupts SSH dialing. CONNECT tunnels
+support TCP half-close, have an idle timeout, and are tracked until graceful
+shutdown. `max_connections` limits the combined number of HTTP upstream
+connections and CONNECT tunnels carried by SSH.
 
 ### Keys Generation
 

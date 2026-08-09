@@ -2,59 +2,125 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
-	"time"
+	"sort"
 
 	"github.com/hightemp/http_ssh_proxy/internal/logutil"
 )
 
-func handleHTTP(w http.ResponseWriter, r *http.Request, dialer Dialer, reqID uint64) {
-	httpClient := &http.Client{
-		Timeout: 60 * time.Second,
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return dialer.Dial(network, addr)
-			},
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 30 * time.Second,
-		},
-	}
-
-	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, r.URL.String(), r.Body)
+func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request, reqID uint64) {
+	outReq, err := outboundRequest(r)
 	if err != nil {
-		log.Printf("[REQ-%d] Error creating request: %v", reqID, err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("[REQ-%d] Invalid forward request: %v", reqID, err)
+		http.Error(w, "Invalid proxy request", http.StatusBadRequest)
 		return
 	}
 
-	for key, values := range r.Header {
-		if key != "Proxy-Authorization" && key != "Proxy-Connection" {
-			outReq.Header[key] = values
-		}
-	}
-
-	resp, err := httpClient.Do(outReq)
+	resp, err := h.client.Do(outReq)
 	if err != nil {
-		log.Printf("[REQ-%d] Error forwarding request to %s: %v", reqID, r.URL.Host, err)
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		log.Printf("[REQ-%d] Forward request to %s failed: %v", reqID, outReq.URL.Host, err)
+		writeDialError(w, err)
 		return
 	}
 	defer logutil.Close(fmt.Sprintf("response body for request %d", reqID), resp.Body)
 
-	for key, values := range resp.Header {
-		w.Header()[key] = values
-	}
+	removeHopByHopHeaders(resp.Header)
+	copyHeader(w.Header(), resp.Header)
+	trailerKeys := announceTrailers(w.Header(), resp.Trailer)
 	w.WriteHeader(resp.StatusCode)
 
-	n, err := io.Copy(w, resp.Body)
-	if err != nil {
-		log.Printf("[REQ-%d] Error copying response (%d bytes written): %v", reqID, n, err)
-	} else {
-		log.Printf("[REQ-%d] Completed %s %d (%d bytes)", reqID, r.URL.Host, resp.StatusCode, n)
+	destination := io.Writer(w)
+	if flusher, ok := w.(http.Flusher); ok {
+		destination = flushingWriter{writer: w, flusher: flusher}
 	}
+
+	n, copyErr := io.Copy(destination, resp.Body)
+	copyTrailers(w.Header(), resp.Trailer, trailerKeys)
+	if copyErr != nil {
+		log.Printf("[REQ-%d] Error copying response from %s (%d bytes written): %v", reqID, outReq.URL.Host, n, copyErr)
+		return
+	}
+	log.Printf("[REQ-%d] Completed %s %d (%d bytes)", reqID, outReq.URL.Host, resp.StatusCode, n)
+}
+
+func writeDialError(w http.ResponseWriter, err error) {
+	var limit interface{ ResourceLimit() bool }
+	if errors.As(err, &limit) && limit.ResourceLimit() {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	http.Error(w, "Bad Gateway", http.StatusBadGateway)
+}
+
+func outboundRequest(in *http.Request) (*http.Request, error) {
+	out := in.Clone(in.Context())
+	requestCtx := out.Context()
+	out = out.WithContext(context.WithValue(requestCtx, requestDialContextKey{}, requestCtx))
+	out.RequestURI = ""
+	out.Header = in.Header.Clone()
+	out.Host = in.Host
+	out.Close = false
+
+	if out.URL.Scheme == "" {
+		out.URL.Scheme = "http"
+	}
+	if out.URL.Host == "" {
+		out.URL.Host = in.Host
+	}
+	if out.URL.Host == "" {
+		return nil, fmt.Errorf("request target has no host")
+	}
+
+	removeHopByHopHeaders(out.Header)
+	out.Header.Del("Proxy-Authorization")
+	out.Header.Del("Proxy-Connection")
+	if _, present := in.Header["User-Agent"]; !present {
+		out.Header.Set("User-Agent", "")
+	}
+	return out, nil
+}
+
+func copyHeader(destination, source http.Header) {
+	for key, values := range source {
+		for _, value := range values {
+			destination.Add(key, value)
+		}
+	}
+}
+
+func announceTrailers(header http.Header, trailers http.Header) []string {
+	keys := make([]string, 0, len(trailers))
+	for key := range trailers {
+		if isHopByHopHeader(key) {
+			continue
+		}
+		keys = append(keys, http.CanonicalHeaderKey(key))
+	}
+	sort.Strings(keys)
+	if len(keys) > 0 {
+		header.Set("Trailer", joinHeaderTokens(keys))
+	}
+	return keys
+}
+
+func copyTrailers(header http.Header, trailers http.Header, keys []string) {
+	for _, key := range keys {
+		header[key] = trailers.Values(key)
+	}
+}
+
+type flushingWriter struct {
+	writer  io.Writer
+	flusher http.Flusher
+}
+
+func (w flushingWriter) Write(data []byte) (int, error) {
+	n, err := w.writer.Write(data)
+	w.flusher.Flush()
+	return n, err
 }

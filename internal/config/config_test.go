@@ -31,6 +31,18 @@ ssh_host_key_fingerprint: SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 	if cfg.SSHPort != 22 {
 		t.Errorf("SSHPort = %d, want 22", cfg.SSHPort)
 	}
+	if cfg.MaxConnections != 128 {
+		t.Errorf("MaxConnections = %d, want 128", cfg.MaxConnections)
+	}
+	if cfg.TunnelIdleTimeoutSeconds != 300 {
+		t.Errorf("TunnelIdleTimeoutSeconds = %d, want 300", cfg.TunnelIdleTimeoutSeconds)
+	}
+	if cfg.ShutdownTimeoutSeconds != 15 {
+		t.Errorf("ShutdownTimeoutSeconds = %d, want 15", cfg.ShutdownTimeoutSeconds)
+	}
+	if cfg.SSHReconnectAttempts != 3 {
+		t.Errorf("SSHReconnectAttempts = %d, want 3", cfg.SSHReconnectAttempts)
+	}
 }
 
 func TestLoadRejectsUnknownFields(t *testing.T) {
@@ -93,6 +105,21 @@ func TestValidateRejectsUnsafeOrIncompleteConfiguration(t *testing.T) {
 			wantErr: "proto must be",
 		},
 		{
+			name:    "invalid connection limit",
+			change:  func(cfg *Config) { cfg.MaxConnections = 0 },
+			wantErr: "max_connections must be between 1 and 10000",
+		},
+		{
+			name:    "invalid tunnel idle timeout",
+			change:  func(cfg *Config) { cfg.TunnelIdleTimeoutSeconds = 0 },
+			wantErr: "tunnel_idle_timeout_seconds must be between 1 and 86400",
+		},
+		{
+			name:    "invalid shutdown timeout",
+			change:  func(cfg *Config) { cfg.ShutdownTimeoutSeconds = 301 },
+			wantErr: "shutdown_timeout_seconds must be between 1 and 300",
+		},
+		{
 			name: "incomplete proxy credentials",
 			change: func(cfg *Config) {
 				cfg.Username = "proxy"
@@ -135,6 +162,11 @@ func TestValidateRejectsUnsafeOrIncompleteConfiguration(t *testing.T) {
 			name:    "invalid SSH port",
 			change:  func(cfg *Config) { cfg.SSHPort = 65536 },
 			wantErr: "ssh_port must be between 1 and 65535",
+		},
+		{
+			name:    "invalid reconnect attempts",
+			change:  func(cfg *Config) { cfg.SSHReconnectAttempts = 0 },
+			wantErr: "ssh_reconnect_attempts must be between 1 and 10",
 		},
 		{
 			name:    "missing SSH user",
@@ -208,21 +240,12 @@ func TestValidateAcceptsKnownHostsFile(t *testing.T) {
 }
 
 func validTestConfig() Config {
-	return Config{
-		ProxyAddr:             "127.0.0.1:8888",
-		Proto:                 "http",
-		SSHHost:               "ssh.example.com",
-		SSHPort:               22,
-		SSHUser:               "proxy",
-		SSHPassword:           "secret",
-		SSHHostKeyFingerprint: testFingerprint,
-		SSHKnownHostsFile:     "",
-		SSHKeyFile:            "",
-		CertPath:              "",
-		KeyPath:               "",
-		Username:              "",
-		Password:              "",
-	}
+	cfg := Default()
+	cfg.SSHHost = "ssh.example.com"
+	cfg.SSHUser = "proxy"
+	cfg.SSHPassword = "secret"
+	cfg.SSHHostKeyFingerprint = testFingerprint
+	return cfg
 }
 
 func writeTestConfig(t *testing.T, contents string) string {

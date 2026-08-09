@@ -2,6 +2,8 @@
 package sshmanager
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -9,194 +11,394 @@ import (
 	"time"
 
 	"github.com/hightemp/http_ssh_proxy/internal/config"
-	"github.com/hightemp/http_ssh_proxy/internal/logutil"
 
 	"golang.org/x/crypto/ssh"
 )
 
-// Manager manages the SSH connection with automatic reconnection and keepalive.
+const (
+	defaultMaxConnections    = 128
+	defaultReconnectAttempts = 3
+	keepAliveInterval        = 30 * time.Second
+	keepAliveFailureLimit    = 3
+)
+
+var (
+	errManagerClosed   = errors.New("SSH manager is closed")
+	errConnectionLimit = &connectionLimitError{}
+)
+
+type connectionLimitError struct{}
+
+func (*connectionLimitError) Error() string {
+	return "SSH connection limit reached"
+}
+
+func (*connectionLimitError) ResourceLimit() bool {
+	return true
+}
+
+type sshClient interface {
+	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
+	SendRequest(name string, wantReply bool, payload []byte) (bool, []byte, error)
+	Close() error
+}
+
+type connector func(ctx context.Context) (sshClient, error)
+
+type clientState struct {
+	client sshClient
+}
+
+// Manager manages the SSH connection with context-aware single-flight
+// reconnection and a bounded number of forwarded connections.
 type Manager struct {
 	config    *config.Config
-	client    *ssh.Client
-	mu        sync.RWMutex
-	closed    chan struct{}
-	closeOnce sync.Once
+	connector connector
+
+	mu    sync.RWMutex
+	state *clientState
+
+	reconnectGate chan struct{}
+	connectionSem chan struct{}
+	backoff       func(attempt int) time.Duration
+	attempts      int
+
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
+	startOnce       sync.Once
+	closeOnce       sync.Once
+	workerMu        sync.Mutex
+	keepAliveDone   chan struct{}
+	closeErr        error
 }
 
 // New creates an SSH connection manager.
 func New(cfg *config.Config) *Manager {
+	return newManager(cfg, func(ctx context.Context) (sshClient, error) {
+		return dialSSH(ctx, cfg)
+	})
+}
+
+func newManager(cfg *config.Config, connect connector) *Manager {
+	maxConnections := cfg.MaxConnections
+	if maxConnections <= 0 {
+		maxConnections = defaultMaxConnections
+	}
+	reconnectAttempts := cfg.SSHReconnectAttempts
+	if reconnectAttempts <= 0 {
+		reconnectAttempts = defaultReconnectAttempts
+	}
+
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	return &Manager{
-		config: cfg,
-		closed: make(chan struct{}),
+		config:          cfg,
+		connector:       connect,
+		reconnectGate:   make(chan struct{}, 1),
+		connectionSem:   make(chan struct{}, maxConnections),
+		backoff:         reconnectBackoff,
+		attempts:        reconnectAttempts,
+		lifecycleCtx:    lifecycleCtx,
+		lifecycleCancel: lifecycleCancel,
 	}
 }
 
-// Connect establishes the initial SSH connection.
-func (m *Manager) Connect() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.connectLocked()
-}
-
-func (m *Manager) connectLocked() error {
-	if m.client != nil {
-		logutil.Close("previous SSH client", m.client)
-		m.client = nil
+// Connect establishes the initial SSH connection and honors ctx cancellation.
+func (m *Manager) Connect(ctx context.Context) error {
+	if err := m.reconnect(ctx, nil); err != nil {
+		return fmt.Errorf("establish initial SSH connection: %w", err)
 	}
-
-	client, err := dialSSH(m.config)
-	if err != nil {
-		return fmt.Errorf("SSH dial failed: %w", err)
-	}
-	m.client = client
-	log.Printf("[SSH] Connected to %s:%d as %s", m.config.SSHHost, m.config.SSHPort, m.config.SSHUser)
 	return nil
 }
 
-func (m *Manager) reconnect() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// DialContext establishes a bounded connection through the SSH tunnel. If the
+// SSH transport has failed, one goroutine reconnects while other callers wait.
+func (m *Manager) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	ctx, cancel := m.linkContext(ctx)
+	defer cancel()
 
-	// Check if the current client is still alive.
-	if m.client != nil {
-		_, _, err := m.client.SendRequest("keepalive@openssh.com", true, nil)
-		if err == nil {
-			return nil
-		}
-		log.Printf("[SSH] Connection check failed: %v, reconnecting...", err)
-	}
-
-	var lastErr error
-	for attempt := 1; attempt <= 5; attempt++ {
-		log.Printf("[SSH] Reconnect attempt %d/5...", attempt)
-		if err := m.connectLocked(); err != nil {
-			lastErr = err
-			log.Printf("[SSH] Reconnect attempt %d failed: %v", attempt, err)
-			backoff := time.Duration(attempt*attempt) * time.Second
-			if backoff > 30*time.Second {
-				backoff = 30 * time.Second
-			}
-			select {
-			case <-time.After(backoff):
-			case <-m.closed:
-				return fmt.Errorf("SSH manager closed during reconnect")
-			}
-			continue
-		}
-		log.Printf("[SSH] Reconnected successfully on attempt %d", attempt)
-		return nil
-	}
-	return fmt.Errorf("SSH reconnect failed after 5 attempts: %w", lastErr)
-}
-
-func (m *Manager) getClient() (*ssh.Client, error) {
-	m.mu.RLock()
-	client := m.client
-	m.mu.RUnlock()
-
-	if client != nil {
-		return client, nil
-	}
-
-	if err := m.reconnect(); err != nil {
+	if err := m.acquireConnection(ctx); err != nil {
 		return nil, err
 	}
+	release := func() { <-m.connectionSem }
 
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.client, nil
-}
-
-// Dial establishes a connection through the SSH tunnel, reconnecting once if
-// the SSH transport appears to be unavailable.
-func (m *Manager) Dial(network, addr string) (net.Conn, error) {
-	client, err := m.getClient()
+	state, err := m.getClient(ctx)
 	if err != nil {
+		release()
 		return nil, fmt.Errorf("SSH client unavailable: %w", err)
 	}
 
-	conn, err := client.Dial(network, addr)
-	if err != nil {
-		// OpenChannelError means that the SSH server is alive but could not reach
-		// this destination. Reconnecting the healthy SSH transport cannot help.
-		if isDestinationDialError(err) {
-			return nil, fmt.Errorf("SSH destination dial to %s failed: %w", addr, err)
-		}
-
-		// The SSH connection may have died — try to reconnect once.
-		log.Printf("[SSH] Dial to %s failed (%v), attempting reconnect...", addr, err)
-		if reconnectErr := m.reconnect(); reconnectErr != nil {
-			return nil, fmt.Errorf("SSH dial failed and reconnect failed: dial=%v reconnect=%v", err, reconnectErr)
-		}
-		client, err = m.getClient()
-		if err != nil {
-			return nil, err
-		}
-		conn, err = client.Dial(network, addr)
-		if err != nil {
-			return nil, fmt.Errorf("SSH dial failed after reconnect: %w", err)
-		}
+	conn, dialErr := state.client.DialContext(ctx, network, addr)
+	if dialErr == nil {
+		return newLimitedConn(conn, release), nil
 	}
-	return conn, nil
+	if isDestinationDialError(dialErr) {
+		release()
+		return nil, fmt.Errorf("SSH destination dial to %s failed: %w", addr, dialErr)
+	}
+
+	log.Printf("[SSH] Dial to %s failed (%v), attempting reconnect", addr, dialErr)
+	if reconnectErr := m.reconnect(ctx, state); reconnectErr != nil {
+		release()
+		return nil, errors.Join(
+			fmt.Errorf("SSH dial to %s failed: %w", addr, dialErr),
+			fmt.Errorf("SSH reconnect failed: %w", reconnectErr),
+		)
+	}
+
+	state, err = m.getClient(ctx)
+	if err != nil {
+		release()
+		return nil, fmt.Errorf("get reconnected SSH client: %w", err)
+	}
+	conn, err = state.client.DialContext(ctx, network, addr)
+	if err != nil {
+		release()
+		return nil, fmt.Errorf("SSH dial to %s failed after reconnect: %w", addr, err)
+	}
+	return newLimitedConn(conn, release), nil
 }
 
-// KeepAlive monitors the active SSH connection until the manager is closed.
-func (m *Manager) KeepAlive() {
-	ticker := time.NewTicker(30 * time.Second)
+// StartKeepAlive starts one monitored keepalive worker tied to ctx and Close.
+func (m *Manager) StartKeepAlive(ctx context.Context) {
+	m.startOnce.Do(func() {
+		m.workerMu.Lock()
+		defer m.workerMu.Unlock()
+		if m.lifecycleCtx.Err() != nil {
+			return
+		}
+		done := make(chan struct{})
+		m.keepAliveDone = done
+		go func() {
+			defer close(done)
+			m.keepAlive(ctx)
+		}()
+	})
+}
+
+func (m *Manager) keepAlive(ctx context.Context) {
+	ticker := time.NewTicker(keepAliveInterval)
 	defer ticker.Stop()
 
 	failCount := 0
 	for {
 		select {
 		case <-ticker.C:
-			m.mu.RLock()
-			client := m.client
-			m.mu.RUnlock()
-
-			if client == nil {
-				log.Printf("[SSH] No active client, triggering reconnect...")
-				if err := m.reconnect(); err != nil {
+			state := m.currentState()
+			if state == nil {
+				if err := m.reconnect(ctx, nil); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, errManagerClosed) {
 					log.Printf("[SSH] Keepalive reconnect failed: %v", err)
 				}
 				continue
 			}
 
-			_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
-			if err != nil {
-				failCount++
-				log.Printf("[SSH] Keepalive failed (count=%d): %v", failCount, err)
-				if failCount >= 3 {
-					log.Printf("[SSH] Keepalive failed %d times, forcing reconnect...", failCount)
-					if err := m.reconnect(); err != nil {
-						log.Printf("[SSH] Keepalive reconnect failed: %v", err)
-					} else {
-						failCount = 0
-					}
-				}
-			} else {
+			_, _, err := state.client.SendRequest("keepalive@openssh.com", true, nil)
+			if err == nil {
 				if failCount > 0 {
 					log.Printf("[SSH] Keepalive recovered after %d failures", failCount)
 				}
 				failCount = 0
+				continue
 			}
 
-		case <-m.closed:
-			log.Println("[SSH] Keepalive loop stopped")
+			failCount++
+			log.Printf("[SSH] Keepalive failed (count=%d): %v", failCount, err)
+			if failCount >= keepAliveFailureLimit {
+				if reconnectErr := m.reconnect(ctx, state); reconnectErr != nil {
+					log.Printf("[SSH] Keepalive reconnect failed: %v", reconnectErr)
+				} else {
+					failCount = 0
+				}
+			}
+		case <-ctx.Done():
+			return
+		case <-m.lifecycleCtx.Done():
 			return
 		}
 	}
 }
 
-// Close stops keepalive processing and closes the SSH connection.
-func (m *Manager) Close() {
+func (m *Manager) getClient(ctx context.Context) (*clientState, error) {
+	if state := m.currentState(); state != nil {
+		return state, nil
+	}
+	if err := m.reconnect(ctx, nil); err != nil {
+		return nil, err
+	}
+	state := m.currentState()
+	if state == nil {
+		return nil, errors.New("SSH reconnect completed without a client")
+	}
+	return state, nil
+}
+
+func (m *Manager) reconnect(parent context.Context, failed *clientState) error {
+	ctx, cancel := m.linkContext(parent)
+	defer cancel()
+
+	select {
+	case m.reconnectGate <- struct{}{}:
+		defer func() { <-m.reconnectGate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	current := m.currentState()
+	if failed == nil && current != nil {
+		return nil
+	}
+	if failed != nil && current != failed {
+		return nil
+	}
+
+	if current != nil {
+		m.clearState(current)
+		if err := current.client.Close(); err != nil {
+			log.Printf("[SSH] Close failed client: %v", err)
+		}
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= m.attempts; attempt++ {
+		log.Printf("[SSH] Connect attempt %d/%d", attempt, m.attempts)
+		client, err := m.connector(ctx)
+		if err == nil {
+			if installErr := m.installClient(client); installErr != nil {
+				return installErr
+			}
+			log.Printf("[SSH] Connected to %s:%d as %s", m.config.SSHHost, m.config.SSHPort, m.config.SSHUser)
+			return nil
+		}
+
+		lastErr = err
+		log.Printf("[SSH] Connect attempt %d failed: %v", attempt, err)
+		if attempt == m.attempts {
+			break
+		}
+		if err := waitContext(ctx, m.backoff(attempt)); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("SSH reconnect failed after %d attempts: %w", m.attempts, lastErr)
+}
+
+func (m *Manager) installClient(client sshClient) error {
+	m.mu.Lock()
+	if err := m.lifecycleCtx.Err(); err != nil {
+		m.mu.Unlock()
+		if closeErr := client.Close(); closeErr != nil {
+			return errors.Join(errManagerClosed, fmt.Errorf("close late SSH client: %w", closeErr))
+		}
+		return errManagerClosed
+	}
+
+	state := &clientState{client: client}
+	previous := m.state
+	m.state = state
+	m.mu.Unlock()
+	if previous != nil {
+		if err := previous.client.Close(); err != nil {
+			log.Printf("[SSH] Close replaced client: %v", err)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) clearState(expected *clientState) {
+	m.mu.Lock()
+	if m.state == expected {
+		m.state = nil
+	}
+	m.mu.Unlock()
+}
+
+func (m *Manager) currentState() *clientState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.state
+}
+
+func (m *Manager) acquireConnection(ctx context.Context) error {
+	if err := m.lifecycleCtx.Err(); err != nil {
+		return errManagerClosed
+	}
+	select {
+	case m.connectionSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return errConnectionLimit
+	}
+}
+
+func (m *Manager) linkContext(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	stop := context.AfterFunc(m.lifecycleCtx, cancel)
+	return ctx, func() {
+		stop()
+		cancel()
+	}
+}
+
+// Close cancels reconnect/keepalive work and closes the active SSH client.
+func (m *Manager) Close() error {
 	m.closeOnce.Do(func() {
-		close(m.closed)
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if m.client != nil {
-			logutil.Close("SSH client", m.client)
-			m.client = nil
+		m.lifecycleCancel()
+		state := m.currentState()
+		if state != nil {
+			m.clearState(state)
+			if err := state.client.Close(); err != nil {
+				m.closeErr = fmt.Errorf("close SSH client: %w", err)
+			}
+		}
+		m.workerMu.Lock()
+		keepAliveDone := m.keepAliveDone
+		m.workerMu.Unlock()
+		if keepAliveDone != nil {
+			<-keepAliveDone
 		}
 		log.Println("[SSH] Manager closed")
 	})
+	return m.closeErr
 }
+
+func reconnectBackoff(attempt int) time.Duration {
+	delay := time.Duration(attempt*attempt) * time.Second
+	return min(delay, 10*time.Second)
+}
+
+func waitContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type limitedConn struct {
+	net.Conn
+	releaseOnce sync.Once
+	release     func()
+}
+
+func newLimitedConn(conn net.Conn, release func()) *limitedConn {
+	return &limitedConn{Conn: conn, release: release}
+}
+
+func (c *limitedConn) Close() error {
+	err := c.Conn.Close()
+	c.releaseOnce.Do(c.release)
+	return err
+}
+
+func (c *limitedConn) CloseWrite() error {
+	if writer, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return writer.CloseWrite()
+	}
+	return nil
+}
+
+var _ sshClient = (*ssh.Client)(nil)

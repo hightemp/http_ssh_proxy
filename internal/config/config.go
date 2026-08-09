@@ -2,6 +2,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
@@ -16,19 +17,28 @@ import (
 )
 
 const (
-	defaultProxyAddr = "127.0.0.1:8888"
-	defaultSSHPort   = 22
-	defaultProto     = "http"
+	defaultProxyAddr                = "127.0.0.1:8888"
+	defaultSSHPort                  = 22
+	defaultProto                    = "http"
+	defaultMaxConnections           = 128
+	defaultTunnelIdleTimeoutSeconds = 300
+	defaultShutdownTimeoutSeconds   = 15
+	defaultSSHReconnectAttempts     = 3
 )
 
 // Config contains the proxy, TLS, and SSH settings.
 type Config struct {
-	ProxyAddr   string `yaml:"listen_addr"`
-	Username    string `yaml:"username"`
-	Password    string `yaml:"password"`
-	Proto       string `yaml:"proto"`
-	CertPath    string `yaml:"pem_path"`
-	KeyPath     string `yaml:"key_path"`
+	ProxyAddr string `yaml:"listen_addr"`
+	Username  string `yaml:"username"`
+	Password  string `yaml:"password"`
+	Proto     string `yaml:"proto"`
+	CertPath  string `yaml:"pem_path"`
+	KeyPath   string `yaml:"key_path"`
+
+	MaxConnections           int `yaml:"max_connections"`
+	TunnelIdleTimeoutSeconds int `yaml:"tunnel_idle_timeout_seconds"`
+	ShutdownTimeoutSeconds   int `yaml:"shutdown_timeout_seconds"`
+
 	SSHHost     string `yaml:"ssh_host"`
 	SSHPort     int    `yaml:"ssh_port"`
 	SSHUser     string `yaml:"ssh_user"`
@@ -37,27 +47,31 @@ type Config struct {
 
 	SSHKnownHostsFile     string `yaml:"ssh_known_hosts_file"`
 	SSHHostKeyFingerprint string `yaml:"ssh_host_key_fingerprint"`
+	SSHReconnectAttempts  int    `yaml:"ssh_reconnect_attempts"`
 }
 
 // Default returns a configuration with conservative local-only defaults.
 func Default() Config {
 	return Config{
-		ProxyAddr: defaultProxyAddr,
-		Proto:     defaultProto,
-		SSHPort:   defaultSSHPort,
+		ProxyAddr:                defaultProxyAddr,
+		Proto:                    defaultProto,
+		MaxConnections:           defaultMaxConnections,
+		TunnelIdleTimeoutSeconds: defaultTunnelIdleTimeoutSeconds,
+		ShutdownTimeoutSeconds:   defaultShutdownTimeoutSeconds,
+		SSHPort:                  defaultSSHPort,
+		SSHReconnectAttempts:     defaultSSHReconnectAttempts,
 	}
 }
 
 // Load reads one strict YAML document, applies defaults, and validates it.
 func Load(path string) (*Config, error) {
-	file, err := os.Open(path)
+	contents, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("open config file %q: %w", path, err)
+		return nil, fmt.Errorf("read config file %q: %w", path, err)
 	}
-	defer func() { _ = file.Close() }()
 
 	cfg := Default()
-	decoder := yaml.NewDecoder(file)
+	decoder := yaml.NewDecoder(bytes.NewReader(contents))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("decode config file %q: %w", path, err)
@@ -120,6 +134,16 @@ func (cfg Config) Validate() error {
 		}
 	}
 
+	if cfg.MaxConnections < 1 || cfg.MaxConnections > 10000 {
+		validationErrors = append(validationErrors, fmt.Errorf("max_connections must be between 1 and 10000, got %d", cfg.MaxConnections))
+	}
+	if cfg.TunnelIdleTimeoutSeconds < 1 || cfg.TunnelIdleTimeoutSeconds > 86400 {
+		validationErrors = append(validationErrors, fmt.Errorf("tunnel_idle_timeout_seconds must be between 1 and 86400, got %d", cfg.TunnelIdleTimeoutSeconds))
+	}
+	if cfg.ShutdownTimeoutSeconds < 1 || cfg.ShutdownTimeoutSeconds > 300 {
+		validationErrors = append(validationErrors, fmt.Errorf("shutdown_timeout_seconds must be between 1 and 300, got %d", cfg.ShutdownTimeoutSeconds))
+	}
+
 	if cfg.SSHHost == "" {
 		validationErrors = append(validationErrors, errors.New("ssh_host is required"))
 	} else if strings.ContainsAny(cfg.SSHHost, " \t\r\n/") {
@@ -127,6 +151,9 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.SSHPort < 1 || cfg.SSHPort > 65535 {
 		validationErrors = append(validationErrors, fmt.Errorf("ssh_port must be between 1 and 65535, got %d", cfg.SSHPort))
+	}
+	if cfg.SSHReconnectAttempts < 1 || cfg.SSHReconnectAttempts > 10 {
+		validationErrors = append(validationErrors, fmt.Errorf("ssh_reconnect_attempts must be between 1 and 10, got %d", cfg.SSHReconnectAttempts))
 	}
 	if cfg.SSHUser == "" {
 		validationErrors = append(validationErrors, errors.New("ssh_user is required"))

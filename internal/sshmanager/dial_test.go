@@ -1,15 +1,19 @@
 package sshmanager
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hightemp/http_ssh_proxy/internal/config"
 
@@ -126,6 +130,57 @@ func TestHostKeyCallbackRejectsInvalidConfiguration(t *testing.T) {
 				t.Fatalf("hostKeyCallback() error = %v, want an error containing %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestDialSSHHandshakeHonorsContext(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close listener: %v", err)
+		}
+	})
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			accepted <- conn
+		}
+	}()
+
+	host, portText, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener address: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse listener port: %v", err)
+	}
+	cfg := config.Default()
+	cfg.SSHHost = host
+	cfg.SSHPort = port
+	cfg.SSHUser = "proxy"
+	cfg.SSHPassword = "secret"
+	cfg.SSHHostKeyFingerprint = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	_, err = dialSSH(ctx, &cfg)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("dialSSH() error = %v, want context deadline exceeded", err)
+	}
+
+	select {
+	case conn := <-accepted:
+		if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close accepted connection: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SSH transport was not accepted")
 	}
 }
 
