@@ -106,6 +106,11 @@ func dialSSH(ctx context.Context, cfg *config.Config) (*ssh.Client, error) {
 		handshakeErr := fmt.Errorf("SSH handshake: %w", err)
 		if ctx.Err() != nil {
 			handshakeErr = fmt.Errorf("SSH handshake canceled: %w", ctx.Err())
+		} else if ctxDeadline, ok := ctx.Deadline(); ok && !time.Now().Before(ctxDeadline) {
+			// A socket deadline can wake NewClientConn just before the context
+			// timer publishes its error. Preserve the context-aware contract in
+			// that narrow race instead of leaking an incidental net timeout.
+			handshakeErr = fmt.Errorf("SSH handshake canceled: %w", context.DeadlineExceeded)
 		}
 		return nil, closeAfterError(conn, handshakeErr)
 	}

@@ -1,65 +1,107 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-CONFIG_FILE="config.yaml"
-if [[ ! -f "$CONFIG_FILE" ]]; then
-  echo "Error: Config file $CONFIG_FILE not found"
-  exit 1
+TARGET_URL="${1:-}"
+CONFIG_FILE="${2:-config.yaml}"
+
+if [[ -z "${TARGET_URL}" ]]; then
+	echo "Usage: $0 <target-url> [config-file]" >&2
+	exit 2
 fi
-
-PORT=$(yq e '.listen_addr' $CONFIG_FILE | cut -d':' -f2)
-CERT=$(yq e '.pem_path' $CONFIG_FILE)
-USERNAME=$(yq e '.username' $CONFIG_FILE)
-PASSWORD=$(yq e '.password' $CONFIG_FILE)
-
-if [[ -z "$PORT" ]]; then
-  echo "Error: Port not found in config"
-  exit 1
-fi
-
-if [[ -z "$CERT" ]]; then
-  echo "Error: Certificate path not found in config"
-  exit 1
-fi
-
-show_menu() {
-  echo "Select test case:"
-  echo "1. HTTPS proxy with certificate verification"
-  echo "2. HTTPS proxy with insecure flag"
-  echo "3. HTTP proxy with basic authentication"
-  echo "4. Exit"
-}
-
-run_test() {
-  case $1 in
-    1)
-      echo "Running HTTPS proxy with certificate verification..."
-      curl -Lv --proxy https://localhost:$PORT --proxy-cacert $CERT https://google.com
-      ;;
-    2)  
-      echo "Running HTTPS proxy with insecure flag..."
-      curl -Lv --proxy https://localhost:$PORT --proxy-insecure https://google.com
-      ;;
-    3)
-      if [[ -z "$USERNAME" || -z "$PASSWORD" ]]; then
-        echo "Error: Username and password not configured"
-        return
-      fi
-      echo "Running HTTP proxy with basic authentication..."
-      curl -Lv --proxy http://localhost:$PORT --proxy-user "$USERNAME:$PASSWORD" https://google.com
-      ;;
-    4)
-      echo "Exiting..."
-      exit 0
-      ;;
-    *)
-      echo "Invalid option"
-      ;;
-  esac
-}
-
-while true; do
-  show_menu
-  read -p "Enter your choice (1-4): " choice
-  run_test $choice
-  echo
+for command_name in yq curl; do
+	if ! command -v "${command_name}" >/dev/null 2>&1; then
+		echo "Error: ${command_name} is required" >&2
+		exit 1
+	fi
 done
+if [[ ! -f "${CONFIG_FILE}" ]]; then
+	echo "Error: config file ${CONFIG_FILE} not found" >&2
+	exit 1
+fi
+
+listen_addr="$(yq -r '.listen_addr // ""' "${CONFIG_FILE}")"
+proto="$(yq -r '.proto // "http"' "${CONFIG_FILE}")"
+pem_path="$(yq -r '.pem_path // ""' "${CONFIG_FILE}")"
+username="$(yq -r '.username // ""' "${CONFIG_FILE}")"
+password="$(yq -r '.password // ""' "${CONFIG_FILE}")"
+
+if [[ "${listen_addr}" == \[*\]:* ]]; then
+	host="${listen_addr%%]*}"
+	host="${host#[}"
+	port="${listen_addr##*]:}"
+else
+	host="${listen_addr%:*}"
+	port="${listen_addr##*:}"
+fi
+if [[ -z "${host}" || -z "${port}" || "${port}" == "${listen_addr}" ]]; then
+	echo "Error: listen_addr must use host:port format" >&2
+	exit 1
+fi
+
+case "${host}" in
+	0.0.0.0 | "") host="127.0.0.1" ;;
+	::) host="::1" ;;
+esac
+if [[ "${host}" == *:* ]]; then
+	proxy_host="[${host}]"
+else
+	proxy_host="${host}"
+fi
+if [[ "${proto}" != "http" && "${proto}" != "https" ]]; then
+	echo "Error: proto must be http or https" >&2
+	exit 1
+fi
+
+curl_args=(
+	--silent
+	--show-error
+	--fail-with-body
+	--location
+	--connect-timeout "${CONNECT_TIMEOUT_SECONDS:-10}"
+	--max-time "${MAX_TIME_SECONDS:-60}"
+	--noproxy ""
+	--proxy "${proto}://${proxy_host}:${port}"
+)
+
+if [[ "${proto}" == "https" ]]; then
+	if [[ -z "${pem_path}" ]]; then
+		echo "Error: pem_path is required for an HTTPS proxy" >&2
+		exit 1
+	fi
+	if [[ "${pem_path}" != /* ]]; then
+		pem_path="$(dirname -- "${CONFIG_FILE}")/${pem_path}"
+	fi
+	curl_args+=(--proxy-cacert "${pem_path}")
+fi
+
+AUTH_CONFIG=""
+cleanup() {
+	if [[ -n "${AUTH_CONFIG}" ]]; then
+		rm -f -- "${AUTH_CONFIG}"
+	fi
+}
+trap cleanup EXIT
+
+if [[ -n "${username}" || -n "${password}" ]]; then
+	if [[ -z "${username}" || -z "${password}" ]]; then
+		echo "Error: username and password must both be configured" >&2
+		exit 1
+	fi
+	escape_curl_config() {
+		local value="$1"
+		value="${value//\\/\\\\}"
+		value="${value//\"/\\\"}"
+		value="${value//$'\n'/\\n}"
+		value="${value//$'\r'/\\r}"
+		printf '%s' "${value}"
+	}
+	AUTH_CONFIG="$(mktemp)"
+	chmod 0600 "${AUTH_CONFIG}"
+	printf 'proxy-user = "%s:%s"\n' \
+		"$(escape_curl_config "${username}")" \
+		"$(escape_curl_config "${password}")" > "${AUTH_CONFIG}"
+	curl_args+=(--config "${AUTH_CONFIG}")
+fi
+
+echo "Testing ${TARGET_URL} through ${proto}://${proxy_host}:${port}"
+curl "${curl_args[@]}" "${TARGET_URL}"

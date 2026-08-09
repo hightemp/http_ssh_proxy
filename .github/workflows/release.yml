@@ -6,22 +6,63 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build and publish
-    runs-on: ubuntu-latest
+  native-smoke:
+    name: Native smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            binary: http_ssh_proxy
+          - os: macos-latest
+            binary: http_ssh_proxy
+          - os: windows-latest
+            binary: http_ssh_proxy.exe
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build and run native binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ldflags="-s -w -X github.com/hightemp/http_ssh_proxy/internal/buildinfo.Version=${GITHUB_REF_NAME} -X github.com/hightemp/http_ssh_proxy/internal/buildinfo.Commit=${GITHUB_SHA} -X github.com/hightemp/http_ssh_proxy/internal/buildinfo.BuildTime=${build_time}"
+          go build -trimpath -ldflags="${ldflags}" -o "${{ matrix.binary }}" ./cmd/http_ssh_proxy
+          output="$(./${{ matrix.binary }} -version)"
+          printf '%s\n' "${output}"
+          grep -F "version=${GITHUB_REF_NAME}" <<< "${output}"
+          grep -F "commit=${GITHUB_SHA}" <<< "${output}"
+
+  release:
+    name: Build, attest, and publish
+    needs: native-smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
           cache: true
@@ -50,6 +91,8 @@ jobs:
           set -euo pipefail
 
           mkdir -p dist package
+          build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ldflags="-s -w -X github.com/hightemp/http_ssh_proxy/internal/buildinfo.Version=${GITHUB_REF_NAME} -X github.com/hightemp/http_ssh_proxy/internal/buildinfo.Commit=${GITHUB_SHA} -X github.com/hightemp/http_ssh_proxy/internal/buildinfo.BuildTime=${build_time}"
           targets=(
             "linux amd64"
             "linux arm64"
@@ -80,7 +123,7 @@ jobs:
 
             "${build_env[@]}" go build \
               -trimpath \
-              -ldflags="-s -w" \
+              -ldflags="${ldflags}" \
               -o "${package_dir}/${binary_name}" \
               ./cmd/http_ssh_proxy
             cp README.md LICENSE VERSION config.example.yaml "${package_dir}/"
@@ -99,8 +142,38 @@ jobs:
 
           (
             cd dist
-            sha256sum ./* > checksums.txt
+            sha256sum -- ./*.tar.gz ./*.zip > artifact-checksums.txt
           )
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/http_ssh_proxy_${{ github.ref_name }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+
+      - name: Write release checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd dist
+            sha256sum -- ./*.tar.gz ./*.zip ./*.spdx.json > checksums.txt
+          )
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/artifact-checksums.txt
+
+      - name: Attest SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/artifact-checksums.txt
+          sbom-path: dist/http_ssh_proxy_${{ github.ref_name }}.spdx.json
 
       - name: Publish GitHub Release
         env:

@@ -4,134 +4,209 @@
 [![CI](https://github.com/hightemp/http_ssh_proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/hightemp/http_ssh_proxy/actions/workflows/ci.yml)
 [![golangci-lint](https://github.com/hightemp/http_ssh_proxy/actions/workflows/golangci-lint.yml/badge.svg)](https://github.com/hightemp/http_ssh_proxy/actions/workflows/golangci-lint.yml)
 [![GitHub Downloads](https://img.shields.io/github/downloads/hightemp/http_ssh_proxy/total?logo=github&label=downloads)](https://github.com/hightemp/http_ssh_proxy/releases)
-[![](https://asdertasd.site/counter/http_ssh_proxy)](https://asdertasd.site/counter/http_ssh_proxy)
 
-This project is a simple HTTP proxy with SSH tunneling support. HTTP requests and HTTPS `CONNECT` tunnels are forwarded through an SSH connection.
+`http_ssh_proxy` is an HTTP forward proxy whose outbound connections travel
+through SSH. It forwards ordinary HTTP requests and HTTPS `CONNECT` tunnels
+while preserving request semantics, cancellation, TCP half-close, and bounded
+graceful shutdown.
 
 ## Features
 
-- **HTTP and HTTPS Support**: Handles regular HTTP requests and tunnels HTTPS requests using the CONNECT method.
-- **SSH Tunneling**: All requests are securely tunneled through an SSH connection.
-- **TLS Configuration**: Supports serving over HTTPS with configurable PEM and key paths.
-- **Graceful Shutdown**: Tracks HTTP requests and hijacked CONNECT tunnels, with bounded shutdown.
-- **Resource Limits**: Bounds SSH-forwarded connections and expires idle CONNECT tunnels.
+- HTTP forwarding and HTTPS `CONNECT` tunneling over one managed SSH transport.
+- OpenSSH `known_hosts` verification or an explicitly pinned SHA256 host-key fingerprint.
+- Optional TLS and Basic proxy authentication for clients.
+- Connection limits, CONNECT idle timeouts, bounded reconnects, and graceful shutdown.
+- Strict YAML validation with safe loopback defaults.
+- Race-tested critical paths with a 90% repository coverage gate.
+- Cross-platform release archives, embedded version metadata, checksums, SPDX SBOM, and GitHub artifact attestations.
 
-## Prerequisites
+## Requirements
 
-- Go 1.26.5 or later
-- SSH server access
-- TLS certificates (if you plan to serve over HTTPS)
+- Go 1.26.5 or later when building from source.
+- An SSH server that permits TCP forwarding.
+- A trusted SSH host key verifier and at least one SSH authentication method.
+- A TLS certificate when exposing the proxy beyond the loopback interface.
 
-## Setup
+## Configuration
 
-### Configuration
+Copy the example and edit it:
 
-1. **Copy the example configuration file**:
-    ```bash
-    cp config.example.yaml config.yaml
-    ```
-   
-2. **Edit `config.yaml`**: Update the SSH endpoint, authentication, and host-key verifier:
+```bash
+cp config.example.yaml config.yaml
+```
 
 ```yaml
-# Safe defaults: 127.0.0.1:8888, HTTP, SSH port 22.
+# Safe defaults: loopback-only HTTP listener and SSH port 22.
 listen_addr: "127.0.0.1:8888"
-username: ""                        # Set both username and password, or neither
+username: ""                         # Set both fields or neither
 password: ""
-proto: "http"                       # http or https
+proto: "http"                        # http or https
 
-max_connections: 128                # Total concurrent SSH-forwarded connections
-tunnel_idle_timeout_seconds: 300     # Close inactive CONNECT tunnels
-shutdown_timeout_seconds: 15         # Graceful shutdown deadline
+max_connections: 128
+tunnel_idle_timeout_seconds: 300
+shutdown_timeout_seconds: 15
 
 ssh_host: "ssh.example.com"
 ssh_port: 22
 ssh_user: "proxy"
-ssh_pass: ""                        # Set ssh_pass, ssh_key_file, or both
+ssh_pass: ""                         # Password, private key, or both
 ssh_key_file: "/home/user/.ssh/id_ed25519"
-ssh_reconnect_attempts: 3            # Context-aware reconnect attempts
-ssh_known_hosts_file: "/home/user/.ssh/known_hosts" # Choose exactly one verifier
+ssh_reconnect_attempts: 3
+
+ssh_known_hosts_file: "/home/user/.ssh/known_hosts" # Exactly one verifier
 # ssh_host_key_fingerprint: "SHA256:..."             # Alternative verifier
 
-# Required when proto is https:
+# Required for proto: https
 # pem_path: "./server.pem"
 # key_path: "./server.key"
 ```
 
-Configure exactly one SSH host key verifier. `ssh_known_hosts_file` uses the
-standard OpenSSH `known_hosts` format. Alternatively, pin the server public
-key with `ssh_host_key_fingerprint`; obtain it through a trusted channel and
-use the complete `SHA256:...` value.
+The loader rejects unknown fields, multiple YAML documents, invalid addresses
+and ports, missing SSH authentication, unreadable key files, invalid TLS
+certificate/key pairs, and ambiguous host-key verification. A non-loopback
+listener is accepted only with HTTPS and both proxy credentials configured.
 
-The loader rejects unknown fields, extra YAML documents, invalid ports, missing
-SSH authentication, unreadable key files, and invalid TLS certificate/key
-pairs. A non-loopback `listen_addr` is accepted only with HTTPS and both proxy
-credentials configured. This prevents accidentally exposing a plaintext open
-proxy; firewall restrictions are still recommended.
+Obtain the SSH host key or fingerprint through a trusted channel. Do not accept
+an unknown key from the same untrusted connection that the proxy will use.
 
-Regular HTTP requests reuse one context-aware transport. Redirect responses are
-returned to the client unchanged, hop-by-hop headers are removed in both
-directions, and request cancellation interrupts SSH dialing. CONNECT tunnels
-support TCP half-close, have an idle timeout, and are tracked until graceful
-shutdown. `max_connections` limits the combined number of HTTP upstream
-connections and CONNECT tunnels carried by SSH.
+### TLS certificate helper
 
-### Keys Generation
+Generate a development certificate without overwriting existing files:
 
-If you need to generate your own TLS keys, you can use the provided script:
 ```bash
-./generate_keys.sh
+./generate_keys.sh server.key server.pem localhost
 ```
 
-### Running the Proxy
+`TLS_DAYS` changes its lifetime and `TLS_SAN` changes the SAN extension. To
+deliberately replace both output files, set `FORCE=1`. Production deployments
+should use a certificate issued for the actual proxy hostname.
 
-1. **Build the project**:
-    ```bash
-    go build -o http_ssh_proxy ./cmd/http_ssh_proxy
-    ```
+## Build and run
 
-    Alternatively, install the latest tagged version:
-    ```bash
-    go install github.com/hightemp/http_ssh_proxy/cmd/http_ssh_proxy@latest
-    ```
+```bash
+make build
+./http_ssh_proxy -config config.yaml
+```
 
-2. **Run the proxy**:
-    ```bash
-    ./http_ssh_proxy -config config.yaml
-    ```
+The Makefile embeds the version from `VERSION`, the current commit, and the UTC
+build time. Inspect a binary or validate configuration without starting the
+proxy:
 
-The proxy server should now be running and listening on the address specified in the `config.yaml` file.
+```bash
+./http_ssh_proxy -version
+./http_ssh_proxy -config config.yaml -check-config
+```
 
-To serve remote clients, set `proto: https`, configure a certificate and key,
-set both `username` and `password`, and restrict access with a firewall.
-Proxy Basic credentials are only encrypted between a remote client and this
-proxy when `proto: https` is enabled; plaintext HTTP is intentionally restricted
-to loopback addresses by configuration validation.
+The canonical module path also supports installation of a tagged source version:
 
-### Tests and checks
+```bash
+go install github.com/hightemp/http_ssh_proxy/cmd/http_ssh_proxy@latest
+```
 
-Run race-enabled tests locally with:
+## Test and inspect a running proxy
+
+Run the automated checks:
 
 ```bash
 make test
+make coverage
+make check
+make fuzz
 ```
 
-`make coverage` enforces at least 90% statement coverage, `make fuzz` exercises
-the authentication and header parsers, and `make check` additionally verifies
-the module graph and runs `govulncheck`. The same tests, coverage gate,
-vulnerability scan, and module checks run for every pull request.
+`make check` verifies the module graph, runs `go vet`, enforces at least 90%
+statement coverage, and runs `govulncheck`. CI performs the same module, test,
+coverage, fuzz-smoke, and vulnerability checks for every pull request.
 
-### Systemd installation
+Test a running proxy against a target you control. The script reads the
+listener, TLS CA, and credentials from the config; credentials are placed in a
+temporary mode-0600 curl config instead of the process arguments:
 
-The installer builds the current source, installs the binary and unit, then restarts the service:
+```bash
+./test.sh https://example.internal/health config.yaml
+```
+
+The script intentionally has no public default target and never disables TLS
+verification.
+
+## Systemd installation
+
+After creating `config.yaml` next to the installer, run:
 
 ```bash
 ./install_service.sh
 ```
 
-An existing `/etc/http_ssh_proxy/config.yaml` is preserved during upgrades.
-The previous executable is retained as `/usr/local/bin/http_ssh_proxy.previous` for rollback.
+The installer builds a metadata-bearing binary, preserves an existing config,
+enforces mode `0600`, validates the config as the service account, installs a
+hardened unit, and verifies that the service becomes active. The previous
+binary is saved as `/usr/local/bin/http_ssh_proxy.previous` and is restored
+automatically if the upgraded service fails to start.
+
+The unit has no Linux capabilities, restricts namespaces, writable filesystem
+access, devices, kernel interfaces, address families, task count, and file
+descriptors. It intentionally permits read-only home access so a configured SSH
+key or `known_hosts` file can remain in the service user's home directory.
+
+## Releases and verification
+
+Tagged releases contain these native archives:
+
+| System | Architectures |
+| --- | --- |
+| Linux | amd64, arm64, armv7 |
+| macOS | amd64, arm64 |
+| Windows | amd64, arm64 |
+
+Before publication, GitHub-hosted Linux, macOS, and Windows runners build and
+execute `-version` natively. The release also includes `checksums.txt` and an
+SPDX JSON SBOM. After downloading an archive and the checksum file, verify it:
+
+```bash
+sha256sum --check checksums.txt --ignore-missing
+gh attestation verify http_ssh_proxy_v0.2.0_linux_amd64.tar.gz \
+  --repo hightemp/http_ssh_proxy
+```
+
+Both build provenance and the SBOM association are attested. Digest validation
+still matters: attestations establish where an artifact came from, not whether
+you intended to trust every dependency in it.
+
+### Creating a release
+
+Change only `VERSION` after committing the release contents, then run:
+
+```bash
+make release
+```
+
+The target validates and commits `VERSION`, refuses an existing local or remote
+tag, creates an annotated tag, and atomically pushes the branch and tag without
+force. Published tags are therefore immutable in the normal workflow.
+
+If a release went wrong and preserving the same version is essential, first
+commit the repair on `main`, make sure the worktree is clean and `VERSION` still
+matches the affected tag, then use the explicit recovery path:
+
+```bash
+make rewrite-release-tag CONFIRM_REWRITE_TAG=v0.2.0
+```
+
+This command force-updates only that tag, protected by the exact remote tag
+object observed immediately before the push (`--force-with-lease`). It never
+force-pushes `main`. Rewriting a published tag invalidates previous checksums,
+cached archives, and users' assumptions; prefer a new patch version whenever
+possible.
+
+## Security model and limitations
+
+- This is an HTTP/HTTPS forward proxy, not a SOCKS proxy or a reverse proxy.
+- Basic proxy credentials are protected in transit only when the client connects over TLS; plaintext HTTP is restricted to loopback by validation.
+- Destination traffic exits from the SSH server and is subject to its DNS, firewall, routing, and audit policy.
+- All requests share one managed SSH client; limits prevent unbounded resource use, but one SSH endpoint remains a dependency and bottleneck.
+- The project does not currently provide per-user authorization, rate limiting, metrics, or a dedicated health endpoint.
+- Protect access to `config.yaml`, SSH private keys, TLS private keys, logs, and the service account.
 
 ## License
 
-This project is open-source and available under the [MIT License](LICENSE).
+This project is available under the [MIT License](LICENSE).
