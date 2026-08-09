@@ -1,3 +1,5 @@
 /config.yaml
 /http_ssh_proxy
 /http_ssh_proxy_static
+/server.key
+/server.pem
