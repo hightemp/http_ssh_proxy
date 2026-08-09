@@ -37,10 +37,17 @@ ssh_port: 22               # SSH port
 ssh_user: "username"       # SSH user
 ssh_pass: "password"       # SSH password
 ssh_key_file: "path/to/key" # SSH key file (optional if using password)
+ssh_known_hosts_file: "/home/user/.ssh/known_hosts" # Use exactly one host key verifier
+# ssh_host_key_fingerprint: "SHA256:..."             # Alternative pinned fingerprint
 proto: "http"              # Protocol (http or https)
 pem_path: "path/to/pem"    # Path to PEM file (only if proto is https)
 key_path: "path/to/key"    # Path to Key file (only if proto is https)
 ```
+
+Configure exactly one SSH host key verifier. `ssh_known_hosts_file` uses the
+standard OpenSSH `known_hosts` format. Alternatively, pin the server public
+key with `ssh_host_key_fingerprint`; obtain it through a trusted channel and
+use the complete `SHA256:...` value.
 
 ### Keys Generation
 

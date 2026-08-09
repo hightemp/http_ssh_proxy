@@ -14,4 +14,7 @@ type Config struct {
 	SSHUser     string `yaml:"ssh_user"`
 	SSHPassword string `yaml:"ssh_pass"`
 	SSHKeyFile  string `yaml:"ssh_key_file"`
+
+	SSHKnownHostsFile     string `yaml:"ssh_known_hosts_file"`
+	SSHHostKeyFingerprint string `yaml:"ssh_host_key_fingerprint"`
 }

@@ -4,8 +4,11 @@ password: test
 ssh_host: 192.168.1.1
 ssh_port: 22
 ssh_user: root
-# ssh_pass: 
+# ssh_pass:
 ssh_key_file: /home/user/.ssh/id_rsa
+# Configure exactly one SSH host key verifier:
+ssh_known_hosts_file: /home/user/.ssh/known_hosts
+# ssh_host_key_fingerprint: SHA256:REPLACE_WITH_SERVER_HOST_KEY_FINGERPRINT
 proto: http
 pem_path: ./server.pem
 key_path: ./server.key
