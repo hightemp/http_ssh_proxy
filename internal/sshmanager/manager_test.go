@@ -254,6 +254,89 @@ func TestCloseCancelsActiveConnect(t *testing.T) {
 	}
 }
 
+func TestKeepAliveReconnectsAfterRepeatedFailures(t *testing.T) {
+	failedRequests := make(chan struct{}, 2)
+	oldClient := &fakeSSHClient{
+		dial: successfulPipeDial,
+		sendRequest: func() error {
+			failedRequests <- struct{}{}
+			return errors.New("keepalive failed")
+		},
+	}
+	newClient := &fakeSSHClient{dial: successfulPipeDial}
+	reconnected := make(chan struct{}, 1)
+	manager := newManager(testManagerConfig(2), func(context.Context) (sshClient, error) {
+		reconnected <- struct{}{}
+		return newClient, nil
+	})
+	manager.keepAliveTick = time.Millisecond
+	manager.keepAliveFail = 2
+	if err := manager.installClient(oldClient); err != nil {
+		t.Fatalf("install initial client: %v", err)
+	}
+	manager.StartKeepAlive(context.Background())
+	t.Cleanup(func() {
+		if err := manager.Close(); err != nil {
+			t.Errorf("close manager: %v", err)
+		}
+	})
+
+	for range 2 {
+		select {
+		case <-failedRequests:
+		case <-time.After(time.Second):
+			t.Fatal("keepalive request was not sent")
+		}
+	}
+	select {
+	case <-reconnected:
+	case <-time.After(time.Second):
+		t.Fatal("keepalive failures did not trigger reconnect")
+	}
+	if got := oldClient.closeCalls.Load(); got != 1 {
+		t.Errorf("failed client close calls = %d, want 1", got)
+	}
+}
+
+func TestKeepAliveReconnectsMissingClient(t *testing.T) {
+	reconnected := make(chan struct{}, 1)
+	manager := newManager(testManagerConfig(1), func(context.Context) (sshClient, error) {
+		reconnected <- struct{}{}
+		return &fakeSSHClient{dial: successfulPipeDial}, nil
+	})
+	manager.keepAliveTick = time.Millisecond
+	manager.StartKeepAlive(context.Background())
+	t.Cleanup(func() {
+		if err := manager.Close(); err != nil {
+			t.Errorf("close manager: %v", err)
+		}
+	})
+
+	select {
+	case <-reconnected:
+	case <-time.After(time.Second):
+		t.Fatal("missing client did not trigger reconnect")
+	}
+}
+
+func TestConnectionLimitError(t *testing.T) {
+	if errConnectionLimit.Error() == "" {
+		t.Error("connection limit error has no message")
+	}
+	if !errConnectionLimit.ResourceLimit() {
+		t.Error("connection limit error does not identify a resource limit")
+	}
+}
+
+func TestReconnectBackoffIsBounded(t *testing.T) {
+	if got := reconnectBackoff(1); got != time.Second {
+		t.Errorf("reconnectBackoff(1) = %v, want 1s", got)
+	}
+	if got := reconnectBackoff(10); got != 10*time.Second {
+		t.Errorf("reconnectBackoff(10) = %v, want 10s", got)
+	}
+}
+
 func successfulPipeDial(context.Context, string, string) (net.Conn, error) {
 	proxySide, peer := net.Pipe()
 	if err := peer.Close(); err != nil {

@@ -6,8 +6,11 @@ GOBUILD := $(GO) build
 VERSION_FILE ?= VERSION
 REMOTE ?= origin
 BRANCH ?= main
+COVERAGE_FILE ?= coverage.out
+COVERAGE_MIN ?= 70
+GOVULNCHECK ?= govulncheck
 
-.PHONY: build build-static test release
+.PHONY: build build-static test vet coverage fuzz module-check vulncheck check release
 
 build:
 	$(GOBUILD) -o $(BINARY_NAME) -v ./cmd/http_ssh_proxy
@@ -17,6 +20,34 @@ build-static:
 
 test:
 	$(GO) test -race ./...
+
+vet:
+	$(GO) vet ./...
+
+coverage:
+	$(GO) test -race -count=1 -covermode=atomic -coverprofile=$(COVERAGE_FILE) ./...
+	@coverage="$$( $(GO) tool cover -func=$(COVERAGE_FILE) | awk '/^total:/ { gsub("%", "", $$3); print $$3 }' )"; \
+	awk -v actual="$$coverage" -v minimum="$(COVERAGE_MIN)" 'BEGIN { \
+		if (actual + 0 < minimum + 0) { \
+			printf "Coverage %.1f%% is below required %.1f%%\n", actual, minimum > "/dev/stderr"; \
+			exit 1; \
+		} \
+		printf "Coverage %.1f%% meets required %.1f%%\n", actual, minimum; \
+	}'
+
+fuzz:
+	$(GO) test ./internal/proxy -run='^$$' -fuzz=FuzzParseBasicProxyAuthorization -fuzztime=5s
+	$(GO) test ./internal/proxy -run='^$$' -fuzz=FuzzRemoveHopByHopHeaders -fuzztime=5s
+
+module-check:
+	$(GO) mod verify
+	$(GO) mod tidy -diff
+	$(GO) list -mod=readonly -deps ./... >/dev/null
+
+vulncheck:
+	$(GOVULNCHECK) ./...
+
+check: module-check vet coverage vulncheck
 
 release: test
 	@set -euo pipefail; \

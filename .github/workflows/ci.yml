@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  COVERAGE_MINIMUM: "70"
+
+jobs:
+  verify:
+    name: Test, modules, and vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download and verify modules
+        run: |
+          go mod download
+          go mod verify
+          go mod tidy -diff
+          go list -mod=readonly -deps ./... >/dev/null
+
+      - name: Test with race detector and coverage
+        run: go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Enforce coverage threshold
+        shell: bash
+        run: |
+          set -euo pipefail
+          coverage="$(go tool cover -func=coverage.out | awk '/^total:/ { gsub("%", "", $3); print $3 }')"
+          awk -v actual="${coverage}" -v minimum="${COVERAGE_MINIMUM}" 'BEGIN {
+            if (actual + 0 < minimum + 0) {
+              printf "Coverage %.1f%% is below required %.1f%%\n", actual, minimum > "/dev/stderr"
+              exit 1
+            }
+            printf "Coverage %.1f%% meets required %.1f%%\n", actual, minimum
+          }'
+
+      - name: Smoke-test fuzz targets
+        run: |
+          go test ./internal/proxy -run='^$' -fuzz=FuzzParseBasicProxyAuthorization -fuzztime=5s
+          go test ./internal/proxy -run='^$' -fuzz=FuzzRemoveHopByHopHeaders -fuzztime=5s
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Scan reachable vulnerabilities
+        run: govulncheck ./...

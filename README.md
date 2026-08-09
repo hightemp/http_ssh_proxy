@@ -1,6 +1,7 @@
 # http_ssh_proxy
 
 [![Go Version](https://img.shields.io/github/go-mod/go-version/hightemp/http_ssh_proxy?logo=go)](https://github.com/hightemp/http_ssh_proxy/blob/main/go.mod)
+[![CI](https://github.com/hightemp/http_ssh_proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/hightemp/http_ssh_proxy/actions/workflows/ci.yml)
 [![golangci-lint](https://github.com/hightemp/http_ssh_proxy/actions/workflows/golangci-lint.yml/badge.svg)](https://github.com/hightemp/http_ssh_proxy/actions/workflows/golangci-lint.yml)
 [![GitHub Downloads](https://img.shields.io/github/downloads/hightemp/http_ssh_proxy/total?logo=github&label=downloads)](https://github.com/hightemp/http_ssh_proxy/releases)
 [![](https://asdertasd.site/counter/http_ssh_proxy)](https://asdertasd.site/counter/http_ssh_proxy)
@@ -103,6 +104,22 @@ The proxy server should now be running and listening on the address specified in
 
 To serve remote clients, set `proto: https`, configure a certificate and key,
 set both `username` and `password`, and restrict access with a firewall.
+Proxy Basic credentials are only encrypted between a remote client and this
+proxy when `proto: https` is enabled; plaintext HTTP is intentionally restricted
+to loopback addresses by configuration validation.
+
+### Tests and checks
+
+Run race-enabled tests locally with:
+
+```bash
+make test
+```
+
+`make coverage` enforces at least 70% statement coverage, `make fuzz` exercises
+the authentication and header parsers, and `make check` additionally verifies
+the module graph and runs `govulncheck`. The same tests, coverage gate,
+vulnerability scan, and module checks run for every pull request.
 
 ### Systemd installation
 

@@ -16,10 +16,10 @@ import (
 )
 
 const (
-	defaultMaxConnections    = 128
-	defaultReconnectAttempts = 3
-	keepAliveInterval        = 30 * time.Second
-	keepAliveFailureLimit    = 3
+	defaultMaxConnections     = 128
+	defaultReconnectAttempts  = 3
+	defaultKeepAliveInterval  = 30 * time.Second
+	defaultKeepAliveFailLimit = 3
 )
 
 var (
@@ -62,6 +62,8 @@ type Manager struct {
 	connectionSem chan struct{}
 	backoff       func(attempt int) time.Duration
 	attempts      int
+	keepAliveTick time.Duration
+	keepAliveFail int
 
 	lifecycleCtx    context.Context
 	lifecycleCancel context.CancelFunc
@@ -97,6 +99,8 @@ func newManager(cfg *config.Config, connect connector) *Manager {
 		connectionSem:   make(chan struct{}, maxConnections),
 		backoff:         reconnectBackoff,
 		attempts:        reconnectAttempts,
+		keepAliveTick:   defaultKeepAliveInterval,
+		keepAliveFail:   defaultKeepAliveFailLimit,
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
 	}
@@ -176,7 +180,7 @@ func (m *Manager) StartKeepAlive(ctx context.Context) {
 }
 
 func (m *Manager) keepAlive(ctx context.Context) {
-	ticker := time.NewTicker(keepAliveInterval)
+	ticker := time.NewTicker(m.keepAliveTick)
 	defer ticker.Stop()
 
 	failCount := 0
@@ -202,7 +206,7 @@ func (m *Manager) keepAlive(ctx context.Context) {
 
 			failCount++
 			log.Printf("[SSH] Keepalive failed (count=%d): %v", failCount, err)
-			if failCount >= keepAliveFailureLimit {
+			if failCount >= m.keepAliveFail {
 				if reconnectErr := m.reconnect(ctx, state); reconnectErr != nil {
 					log.Printf("[SSH] Keepalive reconnect failed: %v", reconnectErr)
 				} else {
