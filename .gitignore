@@ -1,5 +1,6 @@
 /config.yaml
 /http_ssh_proxy
 /http_ssh_proxy_static
+/PROJECT_AUDIT.md
 /server.key
 /server.pem
