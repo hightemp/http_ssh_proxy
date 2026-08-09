@@ -2,7 +2,6 @@ package sshmanager
 
 import (
 	"crypto/subtle"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -37,7 +36,7 @@ func hostKeyCallback(cfg *config.Config) (ssh.HostKeyCallback, error) {
 		}
 		return callback, nil
 	default:
-		if err := validateSHA256Fingerprint(fingerprint); err != nil {
+		if err := config.ValidateSSHHostKeyFingerprint(fingerprint); err != nil {
 			return nil, err
 		}
 
@@ -49,20 +48,6 @@ func hostKeyCallback(cfg *config.Config) (ssh.HostKeyCallback, error) {
 			return nil
 		}, nil
 	}
-}
-
-func validateSHA256Fingerprint(fingerprint string) error {
-	const prefix = "SHA256:"
-	if !strings.HasPrefix(fingerprint, prefix) {
-		return fmt.Errorf("invalid SSH host key fingerprint %q: expected SHA256:<base64>", fingerprint)
-	}
-
-	digest, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(fingerprint, prefix))
-	if err != nil || len(digest) != 32 {
-		return fmt.Errorf("invalid SSH host key fingerprint %q: expected a 32-byte SHA-256 digest", fingerprint)
-	}
-
-	return nil
 }
 
 func dialSSH(cfg *config.Config) (*ssh.Client, error) {
@@ -94,7 +79,7 @@ func dialSSH(cfg *config.Config) (*ssh.Client, error) {
 		Timeout:         10 * time.Second,
 	}
 
-	client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", cfg.SSHHost, cfg.SSHPort), sshConfig)
+	client, err := ssh.Dial("tcp", net.JoinHostPort(cfg.SSHHost, fmt.Sprintf("%d", cfg.SSHPort)), sshConfig)
 	if err != nil {
 		return nil, err
 	}

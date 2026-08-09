@@ -15,8 +15,6 @@ import (
 	"github.com/hightemp/http_ssh_proxy/internal/logutil"
 	"github.com/hightemp/http_ssh_proxy/internal/proxy"
 	"github.com/hightemp/http_ssh_proxy/internal/sshmanager"
-
-	"gopkg.in/yaml.v3"
 )
 
 func main() {
@@ -26,17 +24,12 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.Printf("[STARTUP] Reading config file %s\n", *configPath)
 
-	content, err := os.ReadFile(*configPath)
+	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("[FATAL] Error reading config file: %v", err)
+		log.Fatalf("[FATAL] Error loading config: %v", err)
 	}
 
-	var cfg config.Config
-	if err := yaml.Unmarshal(content, &cfg); err != nil {
-		log.Fatalf("[FATAL] Error parsing config file: %v", err)
-	}
-
-	sshMgr := sshmanager.New(&cfg)
+	sshMgr := sshmanager.New(cfg)
 	if err := sshMgr.Connect(); err != nil {
 		log.Fatalf("[FATAL] Error setting up SSH client: %v", err)
 	}
@@ -80,6 +73,7 @@ func main() {
 
 		tlsConfig := &tls.Config{
 			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
 		}
 
 		listener, err := tls.Listen("tcp", cfg.ProxyAddr, tlsConfig)

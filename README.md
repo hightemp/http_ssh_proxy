@@ -15,7 +15,7 @@ This project is a simple HTTP proxy with SSH tunneling support. HTTP requests an
 
 ## Prerequisites
 
-- Go 1.22 or later
+- Go 1.26.5 or later
 - SSH server access
 - TLS certificates (if you plan to serve over HTTPS)
 
@@ -28,26 +28,38 @@ This project is a simple HTTP proxy with SSH tunneling support. HTTP requests an
     cp config.example.yaml config.yaml
     ```
    
-2. **Edit `config.yaml`**: Update the configuration file with your specific settings. Below are the required fields:
+2. **Edit `config.yaml`**: Update the SSH endpoint, authentication, and host-key verifier:
 
 ```yaml
-listen_addr: "127.0.0.1:8888" # Keep the unauthenticated proxy local
-ssh_host: "your_ssh_host"  # SSH host
-ssh_port: 22               # SSH port
-ssh_user: "username"       # SSH user
-ssh_pass: "password"       # SSH password
-ssh_key_file: "path/to/key" # SSH key file (optional if using password)
-ssh_known_hosts_file: "/home/user/.ssh/known_hosts" # Use exactly one host key verifier
-# ssh_host_key_fingerprint: "SHA256:..."             # Alternative pinned fingerprint
-proto: "http"              # Protocol (http or https)
-pem_path: "path/to/pem"    # Path to PEM file (only if proto is https)
-key_path: "path/to/key"    # Path to Key file (only if proto is https)
+# Safe defaults: 127.0.0.1:8888, HTTP, SSH port 22.
+listen_addr: "127.0.0.1:8888"
+username: ""                        # Set both username and password, or neither
+password: ""
+proto: "http"                       # http or https
+
+ssh_host: "ssh.example.com"
+ssh_port: 22
+ssh_user: "proxy"
+ssh_pass: ""                        # Set ssh_pass, ssh_key_file, or both
+ssh_key_file: "/home/user/.ssh/id_ed25519"
+ssh_known_hosts_file: "/home/user/.ssh/known_hosts" # Choose exactly one verifier
+# ssh_host_key_fingerprint: "SHA256:..."             # Alternative verifier
+
+# Required when proto is https:
+# pem_path: "./server.pem"
+# key_path: "./server.key"
 ```
 
 Configure exactly one SSH host key verifier. `ssh_known_hosts_file` uses the
 standard OpenSSH `known_hosts` format. Alternatively, pin the server public
 key with `ssh_host_key_fingerprint`; obtain it through a trusted channel and
 use the complete `SHA256:...` value.
+
+The loader rejects unknown fields, extra YAML documents, invalid ports, missing
+SSH authentication, unreadable key files, and invalid TLS certificate/key
+pairs. A non-loopback `listen_addr` is accepted only with HTTPS and both proxy
+credentials configured. This prevents accidentally exposing a plaintext open
+proxy; firewall restrictions are still recommended.
 
 ### Keys Generation
 
@@ -75,7 +87,8 @@ If you need to generate your own TLS keys, you can use the provided script:
 
 The proxy server should now be running and listening on the address specified in the `config.yaml` file.
 
-Do not bind an unauthenticated proxy to `0.0.0.0`. If remote clients must use it, configure `username` and `password` and restrict access with a firewall.
+To serve remote clients, set `proto: https`, configure a certificate and key,
+set both `username` and `password`, and restrict access with a firewall.
 
 ### Systemd installation
 
