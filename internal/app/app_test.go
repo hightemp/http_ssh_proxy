@@ -3,10 +3,18 @@ package app
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -130,6 +138,23 @@ func TestProxyListener(t *testing.T) {
 			t.Fatal("proxyListener() returned a listener after TLS failure")
 		}
 	})
+
+	t.Run("HTTPS", func(t *testing.T) {
+		certificatePath, keyPath := writeTestCertificate(t)
+		cfg := config.Default()
+		cfg.ProxyAddr = "127.0.0.1:0"
+		cfg.Proto = "https"
+		cfg.CertPath = certificatePath
+		cfg.KeyPath = keyPath
+		listener, err := proxyListener(&cfg)
+		if err != nil {
+			t.Fatalf("proxyListener() error = %v", err)
+		}
+		if listener.Addr() == nil {
+			t.Error("HTTPS listener has no address")
+		}
+		closeTestConn(t, listener, "HTTPS listener")
+	})
 }
 
 func TestShutdownWaitsThenClosesHijackedConnections(t *testing.T) {
@@ -205,4 +230,45 @@ func closeTestConn(t *testing.T, closer io.Closer, name string) {
 	if err := closer.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		t.Errorf("close %s: %v", name, err)
 	}
+}
+
+func writeTestCertificate(t *testing.T) (string, string) {
+	t.Helper()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate certificate key: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		DNSNames:     []string{"localhost"},
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+	certificateDER, err := x509.CreateCertificate(rand.Reader, template, template, publicKey, privateKey)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+	privateKeyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatalf("marshal private key: %v", err)
+	}
+
+	directory := t.TempDir()
+	certificatePath := filepath.Join(directory, "certificate.pem")
+	keyPath := filepath.Join(directory, "key.pem")
+	certificatePEM := pemEncode("CERTIFICATE", certificateDER)
+	keyPEM := pemEncode("PRIVATE KEY", privateKeyDER)
+	if err := os.WriteFile(certificatePath, certificatePEM, 0o600); err != nil {
+		t.Fatalf("write certificate: %v", err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatalf("write private key: %v", err)
+	}
+	return certificatePath, keyPath
+}
+
+func pemEncode(blockType string, contents []byte) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: blockType, Bytes: contents})
 }

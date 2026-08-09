@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -68,6 +69,35 @@ func TestManagerConnectAndForwardIntegration(t *testing.T) {
 	}
 	if err := conn.Close(); err != nil {
 		t.Fatalf("close forwarded connection: %v", err)
+	}
+}
+
+func TestDialSSHRejectsInvalidCredentials(t *testing.T) {
+	sshServer := newTestSSHServer(t, "proxy", "correct-password")
+	t.Cleanup(sshServer.close)
+
+	host, portText, err := net.SplitHostPort(sshServer.listener.Addr().String())
+	if err != nil {
+		t.Fatalf("split SSH address: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse SSH port: %v", err)
+	}
+	cfg := config.Default()
+	cfg.SSHHost = host
+	cfg.SSHPort = port
+	cfg.SSHUser = "proxy"
+	cfg.SSHPassword = "wrong-password"
+	cfg.SSHHostKeyFingerprint = ssh.FingerprintSHA256(sshServer.hostKey.PublicKey())
+
+	client, err := dialSSH(context.Background(), &cfg)
+	if client != nil {
+		_ = client.Close()
+		t.Fatal("dialSSH() returned a client, want authentication failure")
+	}
+	if err == nil || !strings.Contains(err.Error(), "SSH handshake") {
+		t.Fatalf("dialSSH() error = %v, want handshake failure", err)
 	}
 }
 

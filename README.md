@@ -116,7 +116,7 @@ Run race-enabled tests locally with:
 make test
 ```
 
-`make coverage` enforces at least 70% statement coverage, `make fuzz` exercises
+`make coverage` enforces at least 90% statement coverage, `make fuzz` exercises
 the authentication and header parsers, and `make check` additionally verifies
 the module graph and runs `govulncheck`. The same tests, coverage gate,
 vulnerability scan, and module checks run for every pull request.

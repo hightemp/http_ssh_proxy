@@ -76,6 +76,52 @@ ssh_host: other.example.com
 	}
 }
 
+func TestLoadReportsFileTrailingAndValidationErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    func(*testing.T) string
+		wantErr string
+	}{
+		{
+			name: "missing file",
+			path: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "missing.yaml")
+			},
+			wantErr: "read config file",
+		},
+		{
+			name: "malformed trailing document",
+			path: func(t *testing.T) string {
+				return writeTestConfig(t, `
+ssh_host: ssh.example.com
+ssh_user: proxy
+ssh_pass: secret
+ssh_host_key_fingerprint: SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+---
+[
+`)
+			},
+			wantErr: "decode trailing data",
+		},
+		{
+			name: "validation failure",
+			path: func(t *testing.T) string {
+				return writeTestConfig(t, "ssh_host: ssh.example.com\n")
+			},
+			wantErr: "validate config file",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(tt.path(t))
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Load() error = %v, want an error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateAcceptsSafeLoopbackConfiguration(t *testing.T) {
 	cfg := validTestConfig()
 	if err := cfg.Validate(); err != nil {
@@ -154,9 +200,30 @@ func TestValidateRejectsUnsafeOrIncompleteConfiguration(t *testing.T) {
 			wantErr: "pem_path and key_path must both be set",
 		},
 		{
+			name: "invalid TLS pair",
+			change: func(cfg *Config) {
+				dir := t.TempDir()
+				cfg.Proto = "https"
+				cfg.CertPath = filepath.Join(dir, "certificate.pem")
+				cfg.KeyPath = filepath.Join(dir, "key.pem")
+				if err := os.WriteFile(cfg.CertPath, []byte("invalid"), 0o600); err != nil {
+					t.Fatalf("write certificate: %v", err)
+				}
+				if err := os.WriteFile(cfg.KeyPath, []byte("invalid"), 0o600); err != nil {
+					t.Fatalf("write key: %v", err)
+				}
+			},
+			wantErr: "load TLS certificate and key",
+		},
+		{
 			name:    "missing SSH host",
 			change:  func(cfg *Config) { cfg.SSHHost = "" },
 			wantErr: "ssh_host is required",
+		},
+		{
+			name:    "SSH host contains a path",
+			change:  func(cfg *Config) { cfg.SSHHost = "ssh.example.com/path" },
+			wantErr: "ssh_host must be a hostname or IP address",
 		},
 		{
 			name:    "invalid SSH port",
@@ -204,12 +271,25 @@ func TestValidateRejectsUnsafeOrIncompleteConfiguration(t *testing.T) {
 			wantErr: "expected a 32-byte SHA-256 digest",
 		},
 		{
+			name:    "unsupported host key fingerprint format",
+			change:  func(cfg *Config) { cfg.SSHHostKeyFingerprint = "MD5:00:11" },
+			wantErr: "expected SHA256:<base64>",
+		},
+		{
 			name: "missing known_hosts file",
 			change: func(cfg *Config) {
 				cfg.SSHHostKeyFingerprint = ""
 				cfg.SSHKnownHostsFile = "/missing/known_hosts"
 			},
 			wantErr: "ssh_known_hosts_file",
+		},
+		{
+			name: "known_hosts is a directory",
+			change: func(cfg *Config) {
+				cfg.SSHHostKeyFingerprint = ""
+				cfg.SSHKnownHostsFile = t.TempDir()
+			},
+			wantErr: "must be a regular file",
 		},
 	}
 
@@ -236,6 +316,18 @@ func TestValidateAcceptsKnownHostsFile(t *testing.T) {
 	cfg.SSHKnownHostsFile = knownHostsPath
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestValidateAcceptsLoopbackAddressForms(t *testing.T) {
+	for _, address := range []string{"LOCALHOST:8888", "[::1]:8888"} {
+		t.Run(address, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.ProxyAddr = address
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
 	}
 }
 

@@ -7,7 +7,7 @@ VERSION_FILE ?= VERSION
 REMOTE ?= origin
 BRANCH ?= main
 COVERAGE_FILE ?= coverage.out
-COVERAGE_MIN ?= 70
+COVERAGE_MIN ?= 90
 GOVULNCHECK ?= govulncheck
 
 .PHONY: build build-static test vet coverage fuzz module-check vulncheck check release

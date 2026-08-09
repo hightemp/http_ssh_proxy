@@ -184,6 +184,94 @@ func TestDialSSHHandshakeHonorsContext(t *testing.T) {
 	}
 }
 
+func TestDialSSHRejectsConfigurationKeyAndTransportFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     func(*testing.T) config.Config
+		wantErr string
+	}{
+		{
+			name: "invalid host key verifier",
+			cfg: func(*testing.T) config.Config {
+				cfg := config.Default()
+				return cfg
+			},
+			wantErr: "configure SSH host key verification",
+		},
+		{
+			name: "missing private key",
+			cfg: func(t *testing.T) config.Config {
+				cfg := validDialConfig()
+				cfg.SSHKeyFile = filepath.Join(t.TempDir(), "missing-key")
+				return cfg
+			},
+			wantErr: "read SSH key file",
+		},
+		{
+			name: "invalid private key",
+			cfg: func(t *testing.T) config.Config {
+				cfg := validDialConfig()
+				cfg.SSHKeyFile = filepath.Join(t.TempDir(), "invalid-key")
+				if err := os.WriteFile(cfg.SSHKeyFile, []byte("not a private key"), 0o600); err != nil {
+					t.Fatalf("write invalid key: %v", err)
+				}
+				return cfg
+			},
+			wantErr: "parse SSH private key",
+		},
+		{
+			name: "transport unavailable",
+			cfg: func(*testing.T) config.Config {
+				cfg := validDialConfig()
+				cfg.SSHHost = "127.0.0.1"
+				cfg.SSHPort = 0
+				return cfg
+			},
+			wantErr: "dial SSH transport",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg(t)
+			client, err := dialSSH(context.Background(), &cfg)
+			if client != nil {
+				_ = client.Close()
+				t.Fatal("dialSSH() returned a client, want failure")
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("dialSSH() error = %v, want an error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestCloseAfterErrorJoinsCloseFailure(t *testing.T) {
+	operationErr := errors.New("operation failed")
+	closeErr := errors.New("close failed")
+	err := closeAfterError(errorCloser{err: closeErr}, operationErr)
+	if !errors.Is(err, operationErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("closeAfterError() = %v, want both errors", err)
+	}
+}
+
+type errorCloser struct {
+	err error
+}
+
+func (c errorCloser) Close() error {
+	return c.err
+}
+
+func validDialConfig() config.Config {
+	cfg := config.Default()
+	cfg.SSHHost = "ssh.example.com"
+	cfg.SSHUser = "proxy"
+	cfg.SSHPassword = "secret"
+	cfg.SSHHostKeyFingerprint = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	return cfg
+}
+
 func newTestHostKey(t *testing.T) ssh.PublicKey {
 	t.Helper()
 
