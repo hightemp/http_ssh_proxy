@@ -93,6 +93,26 @@ func TestRunReturnsConnectError(t *testing.T) {
 	}
 }
 
+func TestRunReturnsUpstreamSetupError(t *testing.T) {
+	cfg := config.Default()
+	cfg.UpstreamsEnabled = true
+	cfg.UpstreamStrategy = "least-connections"
+	cfg.Upstreams = []string{"http://proxy.example"}
+	manager := &fakeManager{}
+	err := run(context.Background(), &cfg, manager)
+	if err == nil || !strings.Contains(err.Error(), "set up upstream proxy routing") {
+		t.Fatalf("run() error = %v, want upstream setup error", err)
+	}
+	if !manager.connected.Load() || !manager.keepAlive.Load() || !manager.closed.Load() {
+		t.Errorf(
+			"manager lifecycle = connected %v keepalive %v closed %v; want all true",
+			manager.connected.Load(),
+			manager.keepAlive.Load(),
+			manager.closed.Load(),
+		)
+	}
+}
+
 func TestRunClosesManagerAfterListenError(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

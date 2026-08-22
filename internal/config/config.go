@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -20,10 +21,19 @@ const (
 	defaultProxyAddr                = "127.0.0.1:8888"
 	defaultSSHPort                  = 22
 	defaultProto                    = "http"
+	defaultUpstreamStrategy         = UpstreamStrategyRoundRobin
 	defaultMaxConnections           = 128
 	defaultTunnelIdleTimeoutSeconds = 300
 	defaultShutdownTimeoutSeconds   = 15
 	defaultSSHReconnectAttempts     = 3
+	maxUpstreamProxies              = 100
+)
+
+const (
+	// UpstreamStrategyRandom chooses a random upstream proxy for each request.
+	UpstreamStrategyRandom = "random"
+	// UpstreamStrategyRoundRobin rotates requests across upstream proxies.
+	UpstreamStrategyRoundRobin = "roundrobin"
 )
 
 // Config contains the proxy, TLS, and SSH settings.
@@ -35,9 +45,12 @@ type Config struct {
 	CertPath  string `yaml:"pem_path"`
 	KeyPath   string `yaml:"key_path"`
 
-	MaxConnections           int `yaml:"max_connections"`
-	TunnelIdleTimeoutSeconds int `yaml:"tunnel_idle_timeout_seconds"`
-	ShutdownTimeoutSeconds   int `yaml:"shutdown_timeout_seconds"`
+	MaxConnections           int      `yaml:"max_connections"`
+	TunnelIdleTimeoutSeconds int      `yaml:"tunnel_idle_timeout_seconds"`
+	ShutdownTimeoutSeconds   int      `yaml:"shutdown_timeout_seconds"`
+	UpstreamsEnabled         bool     `yaml:"upstreams_enabled"`
+	UpstreamStrategy         string   `yaml:"upstream_strategy"`
+	Upstreams                []string `yaml:"upstreams"`
 
 	SSHHost     string `yaml:"ssh_host"`
 	SSHPort     int    `yaml:"ssh_port"`
@@ -55,6 +68,8 @@ func Default() Config {
 	return Config{
 		ProxyAddr:                defaultProxyAddr,
 		Proto:                    defaultProto,
+		UpstreamsEnabled:         false,
+		UpstreamStrategy:         defaultUpstreamStrategy,
 		MaxConnections:           defaultMaxConnections,
 		TunnelIdleTimeoutSeconds: defaultTunnelIdleTimeoutSeconds,
 		ShutdownTimeoutSeconds:   defaultShutdownTimeoutSeconds,
@@ -143,6 +158,26 @@ func (cfg Config) Validate() error {
 	if cfg.ShutdownTimeoutSeconds < 1 || cfg.ShutdownTimeoutSeconds > 300 {
 		validationErrors = append(validationErrors, fmt.Errorf("shutdown_timeout_seconds must be between 1 and 300, got %d", cfg.ShutdownTimeoutSeconds))
 	}
+	if cfg.UpstreamStrategy != UpstreamStrategyRandom && cfg.UpstreamStrategy != UpstreamStrategyRoundRobin {
+		validationErrors = append(validationErrors, fmt.Errorf(
+			"upstream_strategy must be %q or %q, got %q",
+			UpstreamStrategyRandom,
+			UpstreamStrategyRoundRobin,
+			cfg.UpstreamStrategy,
+		))
+	}
+	if cfg.UpstreamsEnabled && len(cfg.Upstreams) == 0 {
+		validationErrors = append(validationErrors, errors.New("upstreams must contain at least one entry when upstreams_enabled is true"))
+	}
+	if len(cfg.Upstreams) > maxUpstreamProxies {
+		validationErrors = append(validationErrors, fmt.Errorf("upstreams must contain at most %d entries, got %d", maxUpstreamProxies, len(cfg.Upstreams)))
+	} else {
+		for index, upstream := range cfg.Upstreams {
+			if err := validateUpstreamProxy(upstream, index); err != nil {
+				validationErrors = append(validationErrors, err)
+			}
+		}
+	}
 
 	if cfg.SSHHost == "" {
 		validationErrors = append(validationErrors, errors.New("ssh_host is required"))
@@ -207,11 +242,59 @@ func (cfg *Config) normalize() {
 	cfg.Proto = strings.ToLower(strings.TrimSpace(cfg.Proto))
 	cfg.CertPath = strings.TrimSpace(cfg.CertPath)
 	cfg.KeyPath = strings.TrimSpace(cfg.KeyPath)
+	cfg.UpstreamStrategy = strings.ToLower(strings.TrimSpace(cfg.UpstreamStrategy))
+	for index := range cfg.Upstreams {
+		cfg.Upstreams[index] = strings.TrimSpace(cfg.Upstreams[index])
+	}
 	cfg.SSHHost = strings.TrimSpace(cfg.SSHHost)
 	cfg.SSHUser = strings.TrimSpace(cfg.SSHUser)
 	cfg.SSHKeyFile = strings.TrimSpace(cfg.SSHKeyFile)
 	cfg.SSHKnownHostsFile = strings.TrimSpace(cfg.SSHKnownHostsFile)
 	cfg.SSHHostKeyFingerprint = strings.TrimSpace(cfg.SSHHostKeyFingerprint)
+}
+
+func validateUpstreamProxy(rawURL string, index int) error {
+	field := fmt.Sprintf("upstreams[%d]", index)
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("%s must be a valid proxy URL", field)
+	}
+
+	scheme := strings.ToLower(parsed.Scheme)
+	switch scheme {
+	case "http", "https", "socks", "socks5", "socks5h":
+	default:
+		return fmt.Errorf("%s scheme must be http, https, socks, socks5, or socks5h", field)
+	}
+	if parsed.Hostname() == "" || strings.ContainsAny(parsed.Hostname(), " \t\r\n/") {
+		return fmt.Errorf("%s must contain a valid proxy hostname", field)
+	}
+	if strings.HasSuffix(parsed.Host, ":") {
+		return fmt.Errorf("%s port must be between 1 and 65535", field)
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return fmt.Errorf("%s must not contain a path", field)
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return fmt.Errorf("%s must not contain a query or fragment", field)
+	}
+	if portText := parsed.Port(); portText != "" {
+		port, err := strconv.Atoi(portText)
+		if err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("%s port must be between 1 and 65535", field)
+		}
+	}
+	if parsed.User != nil && parsed.User.Username() == "" {
+		return fmt.Errorf("%s proxy username must not be empty", field)
+	}
+	if parsed.User != nil && (scheme == "socks" || scheme == "socks5" || scheme == "socks5h") {
+		password, _ := parsed.User.Password()
+		if len(parsed.User.Username()) > 255 || len(password) > 255 {
+			return fmt.Errorf("%s SOCKS username and password must be at most 255 bytes", field)
+		}
+	}
+
+	return nil
 }
 
 func validateListenAddress(address string) (string, error) {

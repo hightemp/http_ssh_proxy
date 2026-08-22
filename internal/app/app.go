@@ -35,11 +35,18 @@ func run(ctx context.Context, cfg *config.Config, sshManager connectionManager) 
 	}
 	sshManager.StartKeepAlive(ctx)
 
-	handler := proxy.NewHandler(proxy.Config{
+	handler, err := proxy.NewHandlerWithUpstreams(proxy.Config{
 		Username:          cfg.Username,
 		Password:          cfg.Password,
 		TunnelIdleTimeout: time.Duration(cfg.TunnelIdleTimeoutSeconds) * time.Second,
-	}, sshManager)
+	}, sshManager, proxy.UpstreamConfig{
+		Enabled:  cfg.UpstreamsEnabled,
+		Proxies:  cfg.Upstreams,
+		Strategy: cfg.UpstreamStrategy,
+	})
+	if err != nil {
+		return errors.Join(fmt.Errorf("set up upstream proxy routing: %w", err), sshManager.Close())
+	}
 	server := &http.Server{
 		Addr:              cfg.ProxyAddr,
 		Handler:           handler,

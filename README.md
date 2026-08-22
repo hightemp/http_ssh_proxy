@@ -14,6 +14,8 @@ graceful shutdown.
 ## Features
 
 - HTTP forwarding and HTTPS `CONNECT` tunneling over one managed SSH transport.
+- Optional HTTP, HTTPS, or SOCKS5 upstream proxies reached through the SSH tunnel.
+- Random or round-robin upstream selection for HTTP requests and CONNECT tunnels.
 - OpenSSH `known_hosts` verification or an explicitly pinned SHA256 host-key fingerprint.
 - Optional TLS and Basic proxy authentication for clients.
 - Connection limits, CONNECT idle timeouts, bounded reconnects, and graceful shutdown.
@@ -23,7 +25,7 @@ graceful shutdown.
 
 ## Requirements
 
-- Go 1.26.5 or later when building from source.
+- Go 1.26.6 or later when building from source.
 - An SSH server that permits TCP forwarding.
 - A trusted SSH host key verifier and at least one SSH authentication method.
 - A TLS certificate when exposing the proxy beyond the loopback interface.
@@ -47,6 +49,14 @@ max_connections: 128
 tunnel_idle_timeout_seconds: 300
 shutdown_timeout_seconds: 15
 
+# Disabled by default. Set to true to route through one of the proxies below.
+upstreams_enabled: false
+upstream_strategy: "roundrobin"      # roundrobin or random
+upstreams:
+  - "http://user:password@proxy-a.example.com:3128"
+  - "https://user:password@proxy-b.example.com:443"
+  - "socks5://user:password@proxy-c.example.com:1080"
+
 ssh_host: "ssh.example.com"
 ssh_port: 22
 ssh_user: "proxy"
@@ -66,6 +76,29 @@ The loader rejects unknown fields, multiple YAML documents, invalid addresses
 and ports, missing SSH authentication, unreadable key files, invalid TLS
 certificate/key pairs, and ambiguous host-key verification. A non-loopback
 listener is accepted only with HTTPS and both proxy credentials configured.
+
+When `upstreams_enabled: true`, the connection chain is:
+
+```text
+client -> http_ssh_proxy -> SSH tunnel -> selected upstream proxy -> destination
+```
+
+Supported schemes are `http`, `https`, `socks`, `socks5`, and `socks5h`;
+`socks` is an alias for SOCKS5. Default ports are 80, 443, and 1080
+respectively. Credentials use URL userinfo and must be percent-encoded when
+they contain URL-reserved characters. `roundrobin` rotates complete HTTP
+requests and CONNECT tunnels; `random` chooses one upstream independently for
+each. Per-upstream HTTP transports retain connection reuse without mixing
+connections between proxies.
+
+With `upstreams_enabled: false` (the default), the `upstreams` list is retained
+in configuration but ignored, and destinations are reached directly through
+the SSH connection. Enabling upstream routing requires at least one list entry.
+
+HTTP requests use native forward-proxy absolute-form. CONNECT tunnels use an
+HTTP CONNECT or SOCKS5 CONNECT handshake as appropriate. Hostnames sent through
+SOCKS are resolved by the SOCKS proxy. HTTPS upstream certificates are verified
+against the operating system trust store with TLS 1.2 or newer.
 
 Obtain the SSH host key or fingerprint through a trusted channel. Do not accept
 an unknown key from the same untrusted connection that the proxy will use.
@@ -203,10 +236,11 @@ possible.
 
 - This is an HTTP/HTTPS forward proxy, not a SOCKS proxy or a reverse proxy.
 - Basic proxy credentials are protected in transit only when the client connects over TLS; plaintext HTTP is restricted to loopback by validation.
-- Destination traffic exits from the SSH server and is subject to its DNS, firewall, routing, and audit policy.
+- With upstreams disabled, destination traffic exits from the SSH server. When enabled, the SSH server connects to the selected proxy and destination traffic exits there; both environments' routing and audit policies apply.
+- Credentials sent to an `http` or SOCKS upstream are protected by SSH only up to the SSH server; use an HTTPS upstream or a trusted network between the SSH server and upstream proxy when credential confidentiality matters.
 - All requests share one managed SSH client; limits prevent unbounded resource use, but one SSH endpoint remains a dependency and bottleneck.
 - The project does not currently provide per-user authorization, rate limiting, metrics, or a dedicated health endpoint.
-- Protect access to `config.yaml`, SSH private keys, TLS private keys, logs, and the service account.
+- Protect access to `config.yaml`, upstream credentials, SSH private keys, TLS private keys, logs, and the service account.
 
 ## License
 

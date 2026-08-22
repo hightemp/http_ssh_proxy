@@ -9,6 +9,16 @@ max_connections: 128
 tunnel_idle_timeout_seconds: 300
 shutdown_timeout_seconds: 15
 
+# Optional upstream proxies reached through the SSH tunnel. They are disabled
+# by default; set upstreams_enabled: true to use the list below. Supported
+# schemes: http, https, socks (SOCKS5 alias), socks5, and socks5h.
+upstreams_enabled: false
+upstream_strategy: roundrobin
+upstreams:
+  - http://user:password@proxy-a.example.com:3128
+  - https://user:password@proxy-b.example.com:443
+  - socks5://user:password@proxy-c.example.com:1080
+
 ssh_host: ssh.example.com
 ssh_port: 22
 ssh_user: proxy

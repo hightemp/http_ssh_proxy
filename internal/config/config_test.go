@@ -43,6 +43,49 @@ ssh_host_key_fingerprint: SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 	if cfg.SSHReconnectAttempts != 3 {
 		t.Errorf("SSHReconnectAttempts = %d, want 3", cfg.SSHReconnectAttempts)
 	}
+	if cfg.UpstreamStrategy != UpstreamStrategyRoundRobin {
+		t.Errorf("UpstreamStrategy = %q, want %q", cfg.UpstreamStrategy, UpstreamStrategyRoundRobin)
+	}
+	if cfg.UpstreamsEnabled {
+		t.Error("UpstreamsEnabled = true, want disabled by default")
+	}
+}
+
+func TestLoadNormalizesUpstreamConfiguration(t *testing.T) {
+	path := writeTestConfig(t, `
+upstream_strategy: " RANDOM "
+upstreams_enabled: true
+upstreams:
+  - "  http://proxy-a.example.com:3128  "
+  - "socks5://user:secret@proxy-b.example.com:1080"
+ssh_host: ssh.example.com
+ssh_user: proxy
+ssh_pass: secret
+ssh_host_key_fingerprint: SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.UpstreamStrategy != UpstreamStrategyRandom {
+		t.Errorf("UpstreamStrategy = %q, want %q", cfg.UpstreamStrategy, UpstreamStrategyRandom)
+	}
+	if !cfg.UpstreamsEnabled {
+		t.Error("UpstreamsEnabled = false, want true")
+	}
+	want := []string{
+		"http://proxy-a.example.com:3128",
+		"socks5://user:secret@proxy-b.example.com:1080",
+	}
+	if len(cfg.Upstreams) != len(want) {
+		t.Fatalf("Upstreams = %v, want %v", cfg.Upstreams, want)
+	}
+	for index := range want {
+		if cfg.Upstreams[index] != want[index] {
+			t.Errorf("Upstreams[%d] = %q, want %q", index, cfg.Upstreams[index], want[index])
+		}
+	}
 }
 
 func TestLoadRejectsUnknownFields(t *testing.T) {
@@ -154,6 +197,16 @@ func TestValidateRejectsUnsafeOrIncompleteConfiguration(t *testing.T) {
 			name:    "invalid connection limit",
 			change:  func(cfg *Config) { cfg.MaxConnections = 0 },
 			wantErr: "max_connections must be between 1 and 10000",
+		},
+		{
+			name:    "invalid upstream strategy",
+			change:  func(cfg *Config) { cfg.UpstreamStrategy = "least-connections" },
+			wantErr: "upstream_strategy must be",
+		},
+		{
+			name:    "enabled upstream routing without proxies",
+			change:  func(cfg *Config) { cfg.UpstreamsEnabled = true },
+			wantErr: "upstreams must contain at least one entry when upstreams_enabled is true",
 		},
 		{
 			name:    "invalid tunnel idle timeout",
@@ -302,6 +355,73 @@ func TestValidateRejectsUnsafeOrIncompleteConfiguration(t *testing.T) {
 				t.Fatalf("Validate() error = %v, want an error containing %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidateUpstreamProxies(t *testing.T) {
+	tests := []struct {
+		name      string
+		upstreams []string
+		wantErr   string
+	}{
+		{
+			name: "supported schemes",
+			upstreams: []string{
+				"http://proxy.example.com",
+				"https://user:secret@proxy.example.com:8443/",
+				"socks://proxy.example.com",
+				"socks5://proxy.example.com:1080",
+				"socks5h://user:secret@proxy.example.com",
+			},
+		},
+		{name: "missing scheme", upstreams: []string{"proxy.example.com:3128"}, wantErr: "scheme must be"},
+		{name: "unsupported scheme", upstreams: []string{"ftp://proxy.example.com"}, wantErr: "scheme must be"},
+		{name: "missing hostname", upstreams: []string{"http://"}, wantErr: "valid proxy hostname"},
+		{name: "invalid port", upstreams: []string{"http://proxy.example.com:0"}, wantErr: "port must be"},
+		{name: "empty port", upstreams: []string{"http://proxy.example.com:"}, wantErr: "port must be"},
+		{name: "path", upstreams: []string{"http://proxy.example.com/path"}, wantErr: "must not contain a path"},
+		{name: "query", upstreams: []string{"http://proxy.example.com?token=secret"}, wantErr: "must not contain a query or fragment"},
+		{name: "fragment", upstreams: []string{"http://proxy.example.com#fragment"}, wantErr: "must not contain a query or fragment"},
+		{name: "empty username", upstreams: []string{"http://:secret@proxy.example.com"}, wantErr: "username must not be empty"},
+		{
+			name:      "long SOCKS username",
+			upstreams: []string{"socks5://" + strings.Repeat("a", 256) + "@proxy.example.com"},
+			wantErr:   "at most 255 bytes",
+		},
+		{
+			name:      "too many",
+			upstreams: make([]string, maxUpstreamProxies+1),
+			wantErr:   "at most 100 entries",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.Upstreams = tt.upstreams
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want an error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateUpstreamErrorDoesNotExposeCredentials(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Upstreams = []string{"http://user:supersecret@bad host:3128"}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() succeeded, want invalid URL error")
+	}
+	if strings.Contains(err.Error(), "supersecret") {
+		t.Fatalf("Validate() error exposed proxy password: %v", err)
 	}
 }
 

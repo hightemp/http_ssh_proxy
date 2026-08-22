@@ -33,8 +33,8 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request, reqID ui
 
 	// Do not let reusable idle HTTP connections monopolize the global SSH
 	// connection budget when a long-lived CONNECT tunnel is requested.
-	h.transport.CloseIdleConnections()
-	targetConn, err := h.dialer.DialContext(r.Context(), "tcp", r.Host)
+	h.outbound.CloseIdleConnections()
+	targetConn, err := h.outbound.DialContext(r.Context(), "tcp", r.Host)
 	if err != nil {
 		log.Printf("[REQ-%d] CONNECT dial to %s failed: %v", reqID, r.Host, err)
 		writeDialError(w, err)
