@@ -1,27 +1,15 @@
-[settings]
-# On Windows, inline task scripts run in Windows PowerShell instead of cmd.
-windows_default_inline_shell_args = "powershell -NoProfile -Command"
-
 [tools]
 go = "1.27.3"
 "go:golang.org/x/vuln/cmd/govulncheck" = "latest"
 
-# Unix: delegate to the Makefile. Windows: native PowerShell port of the same
-# logic (no make/bash/awk needed). -race is skipped on Windows because it
+# Unix: delegate to the Makefile. Windows: PowerShell scripts in scripts/ (no
+# make/bash/awk needed). -race is skipped on Windows because it
 # requires cgo and a C compiler.
 
 [tasks.build]
 description = "Build the binary with embedded version info"
 run = "make build"
-run_windows = '''
-$v = (Get-Content VERSION -Raw).Trim()
-if (-not $v) { $v = 'dev' } elseif (-not $v.StartsWith('v')) { $v = "v$v" }
-$c = git rev-parse --short=12 HEAD
-if (-not $c) { $c = 'unknown' }
-$t = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-$m = 'github.com/hightemp/http_ssh_proxy/internal/buildinfo'
-go build -trimpath -ldflags "-X $m.Version=$v -X $m.Commit=$c -X $m.BuildTime=$t" -o http_ssh_proxy.exe -v ./cmd/http_ssh_proxy
-'''
+run_windows = "powershell -NoProfile -File scripts/build.ps1"
 
 [tasks.test]
 description = "Run tests (with the race detector on Unix)"
@@ -35,14 +23,7 @@ run = "go vet ./..."
 [tasks.coverage]
 description = "Run tests and enforce the 90% coverage gate"
 run = "make coverage"
-run_windows = '''
-go test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-$line = go tool cover -func=coverage.out | Select-String '^total:'
-$pct = [double](($line.ToString() -split '\s+')[-1].TrimEnd('%'))
-if ($pct -lt 90) { Write-Error "Coverage $pct% is below required 90%"; exit 1 }
-Write-Host "Coverage $pct% meets required 90%"
-'''
+run_windows = "powershell -NoProfile -File scripts/coverage.ps1"
 
 [tasks.module-check]
 description = "Verify and tidy-check the module graph"
