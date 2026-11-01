@@ -173,8 +173,18 @@ func (e *proxyEndpoint) DialContext(ctx context.Context, network, target string)
 	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
 		deadline = contextDeadline
 	}
+	deadlinesSupported := true
 	if err := conn.SetDeadline(deadline); err != nil {
-		return fail(fmt.Errorf("set upstream proxy handshake deadline: %w", err))
+		if !isDeadlineUnsupported(err) {
+			return fail(fmt.Errorf("set upstream proxy handshake deadline: %w", err))
+		}
+		// Connections such as SSH channels reject deadlines; enforce the
+		// handshake timeout by closing the connection instead.
+		deadlinesSupported = false
+		handshakeTimer := time.AfterFunc(time.Until(deadline), func() {
+			logutil.Close("timed out upstream proxy handshake", conn)
+		})
+		defer handshakeTimer.Stop()
 	}
 
 	tunneled := conn
@@ -203,8 +213,10 @@ func (e *proxyEndpoint) DialContext(ctx context.Context, network, target string)
 	if !stopCancelClose() && ctx.Err() != nil {
 		return nil, closeProxyAfterError(conn, ctx.Err())
 	}
-	if err := conn.SetDeadline(time.Time{}); err != nil {
-		return nil, closeProxyAfterError(conn, fmt.Errorf("clear upstream proxy handshake deadline: %w", err))
+	if deadlinesSupported {
+		if err := conn.SetDeadline(time.Time{}); err != nil {
+			return nil, closeProxyAfterError(conn, fmt.Errorf("clear upstream proxy handshake deadline: %w", err))
+		}
 	}
 	return tunneled, nil
 }

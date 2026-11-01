@@ -5,7 +5,9 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,17 +22,43 @@ type halfCloseWriter interface {
 	CloseWrite() error
 }
 
+// idleConn enforces an idle timeout. It uses connection deadlines when the
+// underlying connection supports them and falls back to a close-on-idle timer
+// otherwise (for example SSH direct-tcpip channels, which reject deadlines).
 type idleConn struct {
 	net.Conn
 	timeout time.Duration
+	timer   *time.Timer
+	mu      sync.Mutex
+}
+
+// isDeadlineUnsupported reports whether err means the connection cannot take
+// deadlines at all, as opposed to a transient failure setting one.
+func isDeadlineUnsupported(err error) bool {
+	return err != nil && (errors.Is(err, os.ErrNoDeadline) ||
+		strings.Contains(err.Error(), "deadline not supported"))
 }
 
 func newIdleConn(conn net.Conn, timeout time.Duration) (*idleConn, error) {
 	wrapped := &idleConn{Conn: conn, timeout: timeout}
 	if err := wrapped.touch(); err != nil {
-		return nil, err
+		if !isDeadlineUnsupported(err) {
+			return nil, err
+		}
+		wrapped.mu.Lock()
+		wrapped.timer = time.AfterFunc(timeout, func() { _ = conn.Close() })
+		wrapped.mu.Unlock()
 	}
 	return wrapped, nil
+}
+
+func (c *idleConn) Close() error {
+	c.mu.Lock()
+	if c.timer != nil {
+		c.timer.Stop()
+	}
+	c.mu.Unlock()
+	return c.Conn.Close()
 }
 
 func (c *idleConn) Read(data []byte) (int, error) {
@@ -69,6 +97,15 @@ func (c *idleConn) CloseWrite() error {
 
 func (c *idleConn) touch() error {
 	if c.timeout <= 0 {
+		return nil
+	}
+	c.mu.Lock()
+	timer := c.timer
+	if timer != nil {
+		timer.Reset(c.timeout)
+	}
+	c.mu.Unlock()
+	if timer != nil {
 		return nil
 	}
 	return c.SetDeadline(time.Now().Add(c.timeout))
@@ -112,6 +149,7 @@ func logTransferResult(reqID uint64, result transferResult) {
 	if strings.Contains(errText, "use of closed network connection") ||
 		strings.Contains(errText, "connection reset by peer") ||
 		strings.Contains(errText, "broken pipe") ||
+		strings.Contains(errText, "socket is not connected") ||
 		strings.Contains(errText, "i/o timeout") {
 		log.Printf("[REQ-%d] %s closed (%d bytes): %v", reqID, result.direction, result.bytes, result.err)
 		return
