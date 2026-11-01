@@ -158,6 +158,13 @@ func (e *proxyEndpoint) DialContext(ctx context.Context, network, target string)
 		stopCancelClose()
 		if ctx.Err() != nil {
 			operationErr = ctx.Err()
+		} else if contextDeadline, ok := ctx.Deadline(); ok && !time.Now().Before(contextDeadline) {
+			// The connection deadline mirrors the context deadline and can fire
+			// slightly before the context timer; report it as the context error.
+			var netErr net.Error
+			if errors.As(operationErr, &netErr) && netErr.Timeout() {
+				operationErr = context.DeadlineExceeded
+			}
 		}
 		return nil, closeProxyAfterError(conn, operationErr)
 	}
@@ -166,8 +173,18 @@ func (e *proxyEndpoint) DialContext(ctx context.Context, network, target string)
 	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
 		deadline = contextDeadline
 	}
+	deadlinesSupported := true
 	if err := conn.SetDeadline(deadline); err != nil {
-		return fail(fmt.Errorf("set upstream proxy handshake deadline: %w", err))
+		if !isDeadlineUnsupported(err) {
+			return fail(fmt.Errorf("set upstream proxy handshake deadline: %w", err))
+		}
+		// Connections such as SSH channels reject deadlines; enforce the
+		// handshake timeout by closing the connection instead.
+		deadlinesSupported = false
+		handshakeTimer := time.AfterFunc(time.Until(deadline), func() {
+			logutil.Close("timed out upstream proxy handshake", conn)
+		})
+		defer handshakeTimer.Stop()
 	}
 
 	tunneled := conn
@@ -196,8 +213,10 @@ func (e *proxyEndpoint) DialContext(ctx context.Context, network, target string)
 	if !stopCancelClose() && ctx.Err() != nil {
 		return nil, closeProxyAfterError(conn, ctx.Err())
 	}
-	if err := conn.SetDeadline(time.Time{}); err != nil {
-		return nil, closeProxyAfterError(conn, fmt.Errorf("clear upstream proxy handshake deadline: %w", err))
+	if deadlinesSupported {
+		if err := conn.SetDeadline(time.Time{}); err != nil {
+			return nil, closeProxyAfterError(conn, fmt.Errorf("clear upstream proxy handshake deadline: %w", err))
+		}
 	}
 	return tunneled, nil
 }
