@@ -103,6 +103,13 @@ against the operating system trust store with TLS 1.2 or newer.
 Obtain the SSH host key or fingerprint through a trusted channel. Do not accept
 an unknown key from the same untrusted connection that the proxy will use.
 
+The proxy requests the host key types recorded for `[host]:port` in
+`known_hosts`, so one entry of any type is enough. As in OpenSSH, an entry
+without a port applies only to port 22. With a fingerprint, the key type is
+unknown, so the proxy tries ED25519, ECDSA and RSA in turn: a server may see up
+to three short connections before authentication. A rejected host key is not
+retried within `ssh_reconnect_attempts`.
+
 ### TLS certificate helper
 
 Generate a development certificate without overwriting existing files:

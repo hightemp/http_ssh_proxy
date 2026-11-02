@@ -2,12 +2,14 @@ package sshmanager
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,12 +20,48 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
+// errHostKeyVerification marks a connection refused because the server's host
+// key could not be verified. Retrying cannot change the outcome.
+var errHostKeyVerification = errors.New("SSH host key verification failed")
+
+// hostKeyAlgorithmGroups lists plain host key algorithms in order of
+// preference. Algorithms of one group share a key type, or differ only in a
+// parameter of it, so a server holds at most one key per group in practice.
+var hostKeyAlgorithmGroups = [][]string{
+	{ssh.KeyAlgoED25519},
+	{ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521},
+	{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256},
+}
+
+var hostCertAlgorithms = []string{
+	ssh.CertAlgoED25519v01,
+	ssh.CertAlgoECDSA256v01,
+	ssh.CertAlgoECDSA384v01,
+	ssh.CertAlgoECDSA521v01,
+	ssh.CertAlgoRSASHA512v01,
+	ssh.CertAlgoRSASHA256v01,
+}
+
 func isDestinationDialError(err error) bool {
 	var openChannelErr *ssh.OpenChannelError
 	return errors.As(err, &openChannelErr)
 }
 
 func hostKeyCallback(cfg *config.Config) (ssh.HostKeyCallback, error) {
+	verify, err := hostKeyVerifier(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		if err := verify(hostname, remote, key); err != nil {
+			return fmt.Errorf("%w for %s: %w", errHostKeyVerification, knownhosts.Normalize(hostname), err)
+		}
+		return nil
+	}, nil
+}
+
+func hostKeyVerifier(cfg *config.Config) (ssh.HostKeyCallback, error) {
 	knownHostsFile := strings.TrimSpace(cfg.SSHKnownHostsFile)
 	fingerprint := strings.TrimSpace(cfg.SSHHostKeyFingerprint)
 
@@ -43,14 +81,71 @@ func hostKeyCallback(cfg *config.Config) (ssh.HostKeyCallback, error) {
 			return nil, err
 		}
 
-		return func(hostname string, _ net.Addr, key ssh.PublicKey) error {
+		return func(_ string, _ net.Addr, key ssh.PublicKey) error {
 			actual := ssh.FingerprintSHA256(key)
 			if subtle.ConstantTimeCompare([]byte(actual), []byte(fingerprint)) != 1 {
-				return fmt.Errorf("SSH host key mismatch for %s: expected %s, got %s", hostname, fingerprint, actual)
+				return fmt.Errorf("expected %s, got %s", fingerprint, actual)
 			}
 			return nil
 		}, nil
 	}
+}
+
+// knownHostKeyAlgorithms returns the host key algorithms to request for a host
+// recorded in known_hosts, or nil when the host has no entries. A server may
+// hold several host keys and presents only the type the client prefers, so
+// requesting a type that is not recorded fails verification with a genuine key.
+func knownHostKeyAlgorithms(verify ssh.HostKeyCallback, address string) ([]string, error) {
+	// No known_hosts entry matches this key, so the verifier reports all
+	// entries recorded for the host. The verifier prefers address over remote.
+	placeholder, err := ssh.NewPublicKey(ed25519.PublicKey(make([]byte, ed25519.PublicKeySize)))
+	if err != nil {
+		return nil, fmt.Errorf("create placeholder host key: %w", err)
+	}
+	var keyErr *knownhosts.KeyError
+	if !errors.As(verify(address, &net.TCPAddr{IP: net.IPv4zero}, placeholder), &keyErr) || len(keyErr.Want) == 0 {
+		return nil, nil
+	}
+
+	recorded := make([]string, 0, len(keyErr.Want))
+	for _, known := range keyErr.Want {
+		recorded = append(recorded, known.Key.Type())
+	}
+
+	// Host certificates come first, as in the library defaults: a certificate
+	// authority entry says nothing about the type of the certified host key.
+	algorithms := slices.Clone(hostCertAlgorithms)
+	for _, group := range hostKeyAlgorithmGroups {
+		for _, algorithm := range group {
+			keyType := algorithm
+			if algorithm == ssh.KeyAlgoRSASHA256 || algorithm == ssh.KeyAlgoRSASHA512 {
+				keyType = ssh.KeyAlgoRSA
+			}
+			if slices.Contains(recorded, keyType) {
+				algorithms = append(algorithms, algorithm)
+			}
+		}
+	}
+	for _, keyType := range recorded {
+		if keyType != ssh.KeyAlgoRSA && !slices.Contains(algorithms, keyType) {
+			algorithms = append(algorithms, keyType)
+		}
+	}
+	return algorithms, nil
+}
+
+// hostKeyAlgorithmAttempts returns the host key algorithm lists to try in
+// order. A fingerprint does not reveal the key type, so every group is probed
+// until the presented key matches. A nil list selects the library defaults.
+func hostKeyAlgorithmAttempts(cfg *config.Config, verify ssh.HostKeyCallback, address string) ([][]string, error) {
+	if strings.TrimSpace(cfg.SSHKnownHostsFile) == "" {
+		return hostKeyAlgorithmGroups, nil
+	}
+	algorithms, err := knownHostKeyAlgorithms(verify, address)
+	if err != nil {
+		return nil, err
+	}
+	return [][]string{algorithms}, nil
 }
 
 func dialSSH(ctx context.Context, cfg *config.Config) (*ssh.Client, error) {
@@ -83,7 +178,48 @@ func dialSSH(ctx context.Context, cfg *config.Config) (*ssh.Client, error) {
 	}
 
 	address := net.JoinHostPort(cfg.SSHHost, fmt.Sprintf("%d", cfg.SSHPort))
-	netDialer := &net.Dialer{Timeout: sshConfig.Timeout}
+	attempts, err := hostKeyAlgorithmAttempts(cfg, verifyHostKey, address)
+	if err != nil {
+		return nil, fmt.Errorf("configure SSH host key verification: %w", err)
+	}
+
+	// All attempts share one deadline.
+	deadline := time.Now().Add(sshConfig.Timeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+
+	var rejected []error
+	var unsupported error
+	for _, algorithms := range attempts {
+		sshConfig.HostKeyAlgorithms = algorithms
+		client, err := handshakeSSH(ctx, address, sshConfig, deadline)
+		switch {
+		case err == nil:
+			return client, nil
+		case len(attempts) == 1:
+			return nil, err
+		case errors.Is(err, errHostKeyVerification):
+			rejected = append(rejected, err)
+		case isHostKeyNegotiationError(err):
+			unsupported = err
+		default:
+			return nil, err
+		}
+	}
+	if len(rejected) > 0 {
+		return nil, errors.Join(rejected...)
+	}
+	return nil, fmt.Errorf("%w for %s: no supported host key type: %w", errHostKeyVerification, knownhosts.Normalize(address), unsupported)
+}
+
+func isHostKeyNegotiationError(err error) bool {
+	var negotiationErr *ssh.AlgorithmNegotiationError
+	return errors.As(err, &negotiationErr) && negotiationErr.What == "host key"
+}
+
+func handshakeSSH(ctx context.Context, address string, sshConfig *ssh.ClientConfig, deadline time.Time) (*ssh.Client, error) {
+	netDialer := &net.Dialer{Deadline: deadline}
 	conn, err := netDialer.DialContext(ctx, "tcp", address)
 	if err != nil {
 		return nil, fmt.Errorf("dial SSH transport: %w", err)
@@ -93,16 +229,13 @@ func dialSSH(ctx context.Context, cfg *config.Config) (*ssh.Client, error) {
 	})
 	defer closeOnCancel()
 
-	deadline := time.Now().Add(sshConfig.Timeout)
-	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
-		deadline = ctxDeadline
-	}
 	if err := conn.SetDeadline(deadline); err != nil {
 		return nil, closeAfterError(conn, fmt.Errorf("set SSH handshake deadline: %w", err))
 	}
 
 	clientConn, channels, requests, err := ssh.NewClientConn(conn, address, sshConfig)
 	if err != nil {
+		// NewClientConn has already closed conn.
 		handshakeErr := fmt.Errorf("SSH handshake: %w", err)
 		if ctx.Err() != nil {
 			handshakeErr = fmt.Errorf("SSH handshake canceled: %w", ctx.Err())
@@ -112,7 +245,7 @@ func dialSSH(ctx context.Context, cfg *config.Config) (*ssh.Client, error) {
 			// that narrow race instead of leaking an incidental net timeout.
 			handshakeErr = fmt.Errorf("SSH handshake canceled: %w", context.DeadlineExceeded)
 		}
-		return nil, closeAfterError(conn, handshakeErr)
+		return nil, handshakeErr
 	}
 	if !closeOnCancel() && ctx.Err() != nil {
 		return nil, closeAfterError(clientConn, fmt.Errorf("SSH handshake canceled: %w", ctx.Err()))
