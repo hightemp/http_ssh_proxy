@@ -1,0 +1,38 @@
+[tools]
+go = "1.27.3"
+"go:golang.org/x/vuln/cmd/govulncheck" = "latest"
+
+# Unix: delegate to the Makefile. Windows: PowerShell scripts in scripts/ (no
+# make/bash/awk needed). -race is skipped on Windows because it
+# requires cgo and a C compiler.
+
+[tasks.build]
+description = "Build the binary with embedded version info"
+run = "make build"
+run_windows = "powershell -NoProfile -File scripts/build.ps1"
+
+[tasks.test]
+description = "Run tests (with the race detector on Unix)"
+run = "make test"
+run_windows = "go test ./..."
+
+[tasks.vet]
+description = "Run go vet"
+run = "go vet ./..."
+
+[tasks.coverage]
+description = "Run tests and enforce the 90% coverage gate"
+run = "make coverage"
+run_windows = "powershell -NoProfile -File scripts/coverage.ps1"
+
+[tasks.module-check]
+description = "Verify and tidy-check the module graph"
+run = ["go mod verify", "go mod tidy -diff", "go build -mod=readonly ./..."]
+
+[tasks.vulncheck]
+description = "Run govulncheck"
+run = "govulncheck ./..."
+
+[tasks.check]
+description = "Module check, vet, coverage and govulncheck"
+depends = ["module-check", "vet", "coverage", "vulncheck"]

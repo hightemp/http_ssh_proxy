@@ -44,7 +44,7 @@ sudo chmod 0600 "${CONFIG_FILE}"
 echo "Validating configuration as ${RUN_USER}..."
 (
 	cd "${CONFIG_DIR}"
-	sudo -u "${RUN_USER}" "${BUILD_DIR}/${SERVICE_NAME}" -config "${CONFIG_FILE}" -check-config
+	sudo -H -u "${RUN_USER}" "${BUILD_DIR}/${SERVICE_NAME}" -config "${CONFIG_FILE}" -check-config
 )
 
 had_previous=0

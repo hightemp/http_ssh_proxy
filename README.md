@@ -25,7 +25,7 @@ graceful shutdown.
 
 ## Requirements
 
-- Go 1.26.6 or later when building from source.
+- Go 1.27.3 or later when building from source (or [mise](https://mise.jdx.dev/): `mise install`).
 - An SSH server that permits TCP forwarding.
 - A trusted SSH host key verifier and at least one SSH authentication method.
 - A TLS certificate when exposing the proxy beyond the loopback interface.
@@ -39,37 +39,52 @@ cp config.example.yaml config.yaml
 ```
 
 ```yaml
-# Safe defaults: loopback-only HTTP listener and SSH port 22.
-listen_addr: "127.0.0.1:8888"
-username: ""                         # Set both fields or neither
-password: ""
-proto: "http"                        # http or https
+# Uncommented settings must be set. Commented-out settings are optional and
+# show their default value, unless a comment says otherwise.
 
-max_connections: 128
-tunnel_idle_timeout_seconds: 300
-shutdown_timeout_seconds: 15
+# listen_addr: 127.0.0.1:8888
+# username: ""  # Set both username and password, or neither
+# password: ""
+# proto: http  # http or https
 
-# Disabled by default. Set to true to route through one of the proxies below.
-upstreams_enabled: false
-upstream_strategy: "roundrobin"      # roundrobin or random
-upstreams:
-  - "http://user:password@proxy-a.example.com:3128"
-  - "https://user:password@proxy-b.example.com:443"
-  - "socks5://user:password@proxy-c.example.com:1080"
+# Resource and shutdown limits.
+# max_connections: 128
+# tunnel_idle_timeout_seconds: 300
+# shutdown_timeout_seconds: 15
 
-ssh_host: "ssh.example.com"
-ssh_port: 22
-ssh_user: "proxy"
-ssh_pass: ""                         # Password, private key, or both
-ssh_key_file: "/home/user/.ssh/id_ed25519"
-ssh_reconnect_attempts: 3
+# Optional upstream proxies reached through the SSH tunnel. They are disabled
+# by default; set upstreams_enabled: true and uncomment the example list below,
+# which is empty by default. Supported schemes: http, https, socks (SOCKS5
+# alias), socks5, and socks5h.
+# upstreams_enabled: false
+# upstream_strategy: roundrobin  # roundrobin or random
+# upstreams:
+#   - http://user:password@proxy-a.example.com:3128
+#   - https://user:password@proxy-b.example.com:443
+#   - socks5://user:password@proxy-c.example.com:1080
 
-ssh_known_hosts_file: "/home/user/.ssh/known_hosts" # Exactly one verifier
-# ssh_host_key_fingerprint: "SHA256:..."             # Alternative verifier
+ssh_host: ssh.example.com
+# ssh_port: 22
+ssh_user: proxy
+# ssh_reconnect_attempts: 3
 
-# Required for proto: https
-# pem_path: "./server.pem"
-# key_path: "./server.key"
+# Set ssh_key_file, ssh_pass, or both. With both, the password is tried first, and
+# the key is used only if the server rejects the password or does not allow it.
+# With neither, the proxy offers every usable key among ~/.ssh/id_ed25519, id_ecdsa
+# and id_rsa. Passphrase-protected keys are skipped. A leading ~/ is expanded here
+# and in ssh_known_hosts_file.
+# ssh_key_file: ~/.ssh/id_ed25519
+# ssh_pass: ""
+
+# Configure at most one SSH host key verifier. With neither, ~/.ssh/known_hosts
+# is used and must exist. The host key type is selected automatically; a
+# fingerprint of any of the server's host keys works.
+# ssh_known_hosts_file: ~/.ssh/known_hosts
+# ssh_host_key_fingerprint: SHA256:REPLACE_WITH_SERVER_HOST_KEY_FINGERPRINT
+
+# Required only when proto is https.
+# pem_path: ./server.pem
+# key_path: ./server.key
 ```
 
 The loader rejects unknown fields, multiple YAML documents, invalid addresses
@@ -100,8 +115,31 @@ HTTP CONNECT or SOCKS5 CONNECT handshake as appropriate. Hostnames sent through
 SOCKS are resolved by the SOCKS proxy. HTTPS upstream certificates are verified
 against the operating system trust store with TLS 1.2 or newer.
 
+If neither `ssh_key_file` nor `ssh_pass` is set, the proxy searches for
+`id_ed25519`, `id_ecdsa` and `id_rsa` in `~/.ssh` once at startup and offers every
+usable key in that order. Passphrase-protected or unreadable keys are skipped with
+a warning, and startup fails if none remains. A problem with an explicit
+`ssh_key_file` is always fatal and never falls back to these keys. A leading `~/`
+is expanded in `ssh_key_file` and `ssh_known_hosts_file`.
+
+If neither `ssh_known_hosts_file` nor `ssh_host_key_fingerprint` is set, the proxy
+uses `~/.ssh/known_hosts`, and startup fails if that file does not exist. The proxy
+never adds entries to it, so an unknown host is still rejected. It does trust every
+entry already in the file, including keys accepted earlier in `ssh` without
+checking them. Configure a verifier explicitly if that is not acceptable.
+
+The log names the host key that passed verification and what verified it, then the
+client key that the server accepted.
+
 Obtain the SSH host key or fingerprint through a trusted channel. Do not accept
 an unknown key from the same untrusted connection that the proxy will use.
+
+The proxy requests the host key types recorded for `[host]:port` in
+`known_hosts`, so one entry of any type is enough. As in OpenSSH, an entry
+without a port applies only to port 22. With a fingerprint, the key type is
+unknown, so the proxy tries ED25519, ECDSA and RSA in turn: a server may see up
+to three short connections before authentication. A rejected host key is not
+retried within `ssh_reconnect_attempts`.
 
 ### TLS certificate helper
 
