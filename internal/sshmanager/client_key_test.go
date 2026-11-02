@@ -68,6 +68,20 @@ func TestDialSSHRejectsWhenNoDefaultClientKeyRemains(t *testing.T) {
 
 func publicKeyDialConfig(t *testing.T, acceptedKey ssh.PublicKey) config.Config {
 	t.Helper()
+	return authDialConfig(t, &ssh.ServerConfig{PublicKeyCallback: acceptPublicKey(acceptedKey)})
+}
+
+func acceptPublicKey(acceptedKey ssh.PublicKey) func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
+	return func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+		if !bytes.Equal(key.Marshal(), acceptedKey.Marshal()) {
+			return nil, errors.New("unknown client key")
+		}
+		return nil, nil
+	}
+}
+
+func authDialConfig(t *testing.T, serverConfig *ssh.ServerConfig) config.Config {
+	t.Helper()
 	hostKey := newHostKeySigners(t).ed25519
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -78,14 +92,6 @@ func publicKeyDialConfig(t *testing.T, acceptedKey ssh.PublicKey) config.Config 
 		hostKey:  hostKey,
 		done:     make(chan struct{}),
 		conns:    make(map[net.Conn]struct{}),
-	}
-	serverConfig := &ssh.ServerConfig{
-		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			if !bytes.Equal(key.Marshal(), acceptedKey.Marshal()) {
-				return nil, errors.New("unknown client key")
-			}
-			return nil, nil
-		},
 	}
 	serverConfig.AddHostKey(hostKey)
 	go server.serve(serverConfig)

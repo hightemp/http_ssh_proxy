@@ -53,11 +53,16 @@ func hostKeyCallback(cfg *config.Config) (ssh.HostKeyCallback, error) {
 	if err != nil {
 		return nil, err
 	}
+	source := "pinned fingerprint"
+	if knownHostsFile := strings.TrimSpace(cfg.SSHKnownHostsFile); knownHostsFile != "" {
+		source = "known_hosts file " + knownHostsFile
+	}
 
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		if err := verify(hostname, remote, key); err != nil {
 			return fmt.Errorf("%w for %s: %w", errHostKeyVerification, knownhosts.Normalize(hostname), err)
 		}
+		log.Printf("[SSH] Host key verified for %s: %s %s by %s", knownhosts.Normalize(hostname), key.Type(), ssh.FingerprintSHA256(key), source)
 		return nil
 	}, nil
 }
@@ -155,6 +160,7 @@ func dialSSH(ctx context.Context, cfg *config.Config) (*ssh.Client, error) {
 		return nil, fmt.Errorf("configure SSH host key verification: %w", err)
 	}
 
+	var usedClientKey string
 	var auth []ssh.AuthMethod
 	if cfg.SSHPassword != "" {
 		auth = append(auth, ssh.Password(cfg.SSHPassword))
@@ -168,10 +174,10 @@ func dialSSH(ctx context.Context, cfg *config.Config) (*ssh.Client, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse SSH private key: %w", err)
 		}
-		auth = append(auth, ssh.PublicKeys(signer))
+		auth = append(auth, ssh.PublicKeys(trackClientKey(signer, cfg.SSHKeyFile, &usedClientKey)))
 	}
 	if len(cfg.SSHDefaultKeyFiles) > 0 {
-		signers, err := defaultClientKeySigners(cfg.SSHDefaultKeyFiles)
+		signers, err := defaultClientKeySigners(cfg.SSHDefaultKeyFiles, &usedClientKey)
 		if err != nil {
 			return nil, err
 		}
@@ -204,6 +210,11 @@ func dialSSH(ctx context.Context, cfg *config.Config) (*ssh.Client, error) {
 		client, err := handshakeSSH(ctx, address, sshConfig, deadline)
 		switch {
 		case err == nil:
+			if usedClientKey == "" {
+				log.Printf("[SSH] Authenticated without a client key")
+			} else {
+				log.Printf("[SSH] Authenticated with client key %s", usedClientKey)
+			}
 			return client, nil
 		case len(attempts) == 1:
 			return nil, err
@@ -223,7 +234,7 @@ func dialSSH(ctx context.Context, cfg *config.Config) (*ssh.Client, error) {
 
 // defaultClientKeySigners rereads the default client keys for each connection.
 // A key that stopped being usable since startup is skipped.
-func defaultClientKeySigners(paths []string) ([]ssh.Signer, error) {
+func defaultClientKeySigners(paths []string, used *string) ([]ssh.Signer, error) {
 	var signers []ssh.Signer
 	for _, path := range paths {
 		key, err := os.ReadFile(path)
@@ -236,12 +247,44 @@ func defaultClientKeySigners(paths []string) ([]ssh.Signer, error) {
 			log.Printf("[SSH] Skipping default client key %s: %v", path, err)
 			continue
 		}
-		signers = append(signers, signer)
+		signers = append(signers, trackClientKey(signer, path, used))
 	}
 	if len(signers) == 0 {
 		return nil, fmt.Errorf("no usable default SSH client key in %s", strings.Join(paths, ", "))
 	}
 	return signers, nil
+}
+
+// trackedClientKey records the client key used to authenticate. The library
+// signs only after the server has agreed to consider a key, so the last key that
+// signed before authentication succeeded is the one the server accepted.
+type trackedClientKey struct {
+	ssh.AlgorithmSigner
+	description string
+	used        *string
+}
+
+func trackClientKey(signer ssh.Signer, path string, used *string) ssh.Signer {
+	algorithmSigner, ok := signer.(ssh.AlgorithmSigner)
+	if !ok {
+		return signer
+	}
+	publicKey := signer.PublicKey()
+	return trackedClientKey{
+		AlgorithmSigner: algorithmSigner,
+		description:     fmt.Sprintf("%s: %s %s", path, publicKey.Type(), ssh.FingerprintSHA256(publicKey)),
+		used:            used,
+	}
+}
+
+func (k trackedClientKey) Sign(random io.Reader, data []byte) (*ssh.Signature, error) {
+	*k.used = k.description
+	return k.AlgorithmSigner.Sign(random, data)
+}
+
+func (k trackedClientKey) SignWithAlgorithm(random io.Reader, data []byte, algorithm string) (*ssh.Signature, error) {
+	*k.used = k.description
+	return k.AlgorithmSigner.SignWithAlgorithm(random, data, algorithm)
 }
 
 func isHostKeyNegotiationError(err error) bool {
