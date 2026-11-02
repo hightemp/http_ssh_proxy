@@ -275,6 +275,9 @@ func (m *Manager) reconnect(parent context.Context, failed *clientState) error {
 
 		lastErr = err
 		log.Printf("[SSH] Connect attempt %d failed: %v", attempt, err)
+		if errors.Is(err, errHostKeyVerification) {
+			return fmt.Errorf("SSH connect aborted: %w", err)
+		}
 		if attempt == m.attempts {
 			break
 		}

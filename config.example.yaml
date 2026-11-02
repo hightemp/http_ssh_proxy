@@ -1,32 +1,38 @@
-# Safe defaults are listen_addr: 127.0.0.1:8888, proto: http, and ssh_port: 22.
-listen_addr: 127.0.0.1:8888
-username: ""
-password: ""
-proto: http
+# Uncommented settings must be set. Commented-out settings are optional and
+# show their default value, unless a comment says otherwise.
+
+# listen_addr: 127.0.0.1:8888
+# username: ""
+# password: ""
+# proto: http
 
 # Resource and shutdown limits.
-max_connections: 128
-tunnel_idle_timeout_seconds: 300
-shutdown_timeout_seconds: 15
+# max_connections: 128
+# tunnel_idle_timeout_seconds: 300
+# shutdown_timeout_seconds: 15
 
 # Optional upstream proxies reached through the SSH tunnel. They are disabled
-# by default; set upstreams_enabled: true to use the list below. Supported
-# schemes: http, https, socks (SOCKS5 alias), socks5, and socks5h.
-upstreams_enabled: false
-upstream_strategy: roundrobin
-upstreams:
-  - http://user:password@proxy-a.example.com:3128
-  - https://user:password@proxy-b.example.com:443
-  - socks5://user:password@proxy-c.example.com:1080
+# by default; set upstreams_enabled: true and uncomment the example list below,
+# which is empty by default. Supported schemes: http, https, socks (SOCKS5
+# alias), socks5, and socks5h.
+# upstreams_enabled: false
+# upstream_strategy: roundrobin
+# upstreams:
+#   - http://user:password@proxy-a.example.com:3128
+#   - https://user:password@proxy-b.example.com:443
+#   - socks5://user:password@proxy-c.example.com:1080
 
 ssh_host: ssh.example.com
-ssh_port: 22
+# ssh_port: 22
 ssh_user: proxy
-ssh_pass: ""
-ssh_key_file: /home/user/.ssh/id_ed25519
-ssh_reconnect_attempts: 3
+# ssh_reconnect_attempts: 3
 
-# Configure exactly one SSH host key verifier.
+# Set ssh_key_file, ssh_pass, or both.
+ssh_key_file: /home/user/.ssh/id_ed25519
+# ssh_pass: ""
+
+# Configure exactly one SSH host key verifier. The host key type is selected
+# automatically; a fingerprint of any of the server's host keys works.
 ssh_known_hosts_file: /home/user/.ssh/known_hosts
 # ssh_host_key_fingerprint: SHA256:REPLACE_WITH_SERVER_HOST_KEY_FINGERPRINT
 
