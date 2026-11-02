@@ -27,13 +27,15 @@ ssh_host: ssh.example.com
 ssh_user: proxy
 # ssh_reconnect_attempts: 3
 
-# Set ssh_key_file, ssh_pass, or both.
-ssh_key_file: /home/user/.ssh/id_ed25519
+# Set ssh_key_file, ssh_pass, or both. With neither, the proxy offers every usable
+# key among ~/.ssh/id_ed25519, id_ecdsa and id_rsa. Passphrase-protected keys are
+# skipped. A leading ~/ is expanded here and in ssh_known_hosts_file.
+# ssh_key_file: ~/.ssh/id_ed25519
 # ssh_pass: ""
 
 # Configure exactly one SSH host key verifier. The host key type is selected
 # automatically; a fingerprint of any of the server's host keys works.
-ssh_known_hosts_file: /home/user/.ssh/known_hosts
+ssh_known_hosts_file: ~/.ssh/known_hosts
 # ssh_host_key_fingerprint: SHA256:REPLACE_WITH_SERVER_HOST_KEY_FINGERPRINT
 
 # Required only when proto is https.
