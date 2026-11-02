@@ -64,7 +64,7 @@ ssh_pass: ""                         # Password, private key, or both
 ssh_key_file: "~/.ssh/id_ed25519"    # With neither, default keys are searched
 ssh_reconnect_attempts: 3
 
-ssh_known_hosts_file: "~/.ssh/known_hosts" # Exactly one verifier
+ssh_known_hosts_file: "~/.ssh/known_hosts" # At most one verifier
 # ssh_host_key_fingerprint: "SHA256:..."             # Alternative verifier
 
 # Required for proto: https
@@ -106,6 +106,15 @@ usable key in that order. Passphrase-protected or unreadable keys are skipped wi
 a warning, and startup fails if none remains. A problem with an explicit
 `ssh_key_file` is always fatal and never falls back to these keys. A leading `~/`
 is expanded in `ssh_key_file` and `ssh_known_hosts_file`.
+
+If neither `ssh_known_hosts_file` nor `ssh_host_key_fingerprint` is set, the proxy
+uses `~/.ssh/known_hosts`, and startup fails if that file does not exist. The proxy
+never adds entries to it, so an unknown host is still rejected. It does trust every
+entry already in the file, including keys accepted earlier in `ssh` without
+checking them. Configure a verifier explicitly if that is not acceptable.
+
+The log names the host key that passed verification and what verified it, then the
+client key that the server accepted.
 
 Obtain the SSH host key or fingerprint through a trusted channel. Do not accept
 an unknown key from the same untrusted connection that the proxy will use.

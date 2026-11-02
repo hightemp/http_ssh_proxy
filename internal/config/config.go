@@ -70,7 +70,9 @@ type Config struct {
 
 	SSHKnownHostsFile     string `yaml:"ssh_known_hosts_file"`
 	SSHHostKeyFingerprint string `yaml:"ssh_host_key_fingerprint"`
-	SSHReconnectAttempts  int    `yaml:"ssh_reconnect_attempts"`
+	// checkedKnownHostsFile is the path searched for the default known_hosts file.
+	checkedKnownHostsFile string
+	SSHReconnectAttempts  int `yaml:"ssh_reconnect_attempts"`
 }
 
 // defaultClientKeyNames lists default client key file names in the order they
@@ -117,6 +119,9 @@ func Load(path string) (*Config, error) {
 	cfg.normalize()
 	if cfg.SSHKeyFile == "" && cfg.SSHPassword == "" {
 		cfg.findDefaultClientKeys()
+	}
+	if cfg.SSHKnownHostsFile == "" && cfg.SSHHostKeyFingerprint == "" {
+		cfg.findDefaultKnownHostsFile()
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config file %q: %w", path, err)
@@ -226,7 +231,11 @@ func (cfg Config) Validate() error {
 
 	switch {
 	case cfg.SSHKnownHostsFile == "" && cfg.SSHHostKeyFingerprint == "":
-		validationErrors = append(validationErrors, errors.New("set ssh_known_hosts_file or ssh_host_key_fingerprint for SSH host key verification"))
+		err := errors.New("set ssh_known_hosts_file or ssh_host_key_fingerprint for SSH host key verification")
+		if cfg.checkedKnownHostsFile != "" {
+			err = fmt.Errorf("%w: default file %s not found", err, cfg.checkedKnownHostsFile)
+		}
+		validationErrors = append(validationErrors, err)
 	case cfg.SSHKnownHostsFile != "" && cfg.SSHHostKeyFingerprint != "":
 		validationErrors = append(validationErrors, errors.New("ssh_known_hosts_file and ssh_host_key_fingerprint are mutually exclusive"))
 	case cfg.SSHKnownHostsFile != "":
@@ -316,6 +325,23 @@ func (cfg *Config) findDefaultClientKeys() {
 	if len(cfg.SSHDefaultKeyFiles) > 0 {
 		log.Printf("[STARTUP] Using default SSH client keys: %s", strings.Join(cfg.SSHDefaultKeyFiles, ", "))
 	}
+}
+
+// findDefaultKnownHostsFile selects the default known_hosts file if it exists.
+// Entries are never added to it, so an unknown host is still rejected.
+func (cfg *Config) findDefaultKnownHostsFile() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		log.Printf("[STARTUP] Cannot search for the default known_hosts file: %v", err)
+		return
+	}
+	path := filepath.Join(home, ".ssh", "known_hosts")
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		cfg.checkedKnownHostsFile = path
+		return
+	}
+	cfg.SSHKnownHostsFile = path
+	log.Printf("[STARTUP] Using default known_hosts file: %s", path)
 }
 
 func validateUpstreamProxy(rawURL string, index int) error {

@@ -33,9 +33,10 @@ ssh_user: proxy
 # ssh_key_file: ~/.ssh/id_ed25519
 # ssh_pass: ""
 
-# Configure exactly one SSH host key verifier. The host key type is selected
-# automatically; a fingerprint of any of the server's host keys works.
-ssh_known_hosts_file: ~/.ssh/known_hosts
+# Configure at most one SSH host key verifier. With neither, ~/.ssh/known_hosts
+# is used and must exist. The host key type is selected automatically; a
+# fingerprint of any of the server's host keys works.
+# ssh_known_hosts_file: ~/.ssh/known_hosts
 # ssh_host_key_fingerprint: SHA256:REPLACE_WITH_SERVER_HOST_KEY_FINGERPRINT
 
 # Required only when proto is https.
