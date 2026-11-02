@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/pem"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -138,6 +139,56 @@ func TestDialSSHLogsPasswordAuthenticationWithoutClientKey(t *testing.T) {
 
 	if !strings.Contains(logs.String(), "Authenticated without a client key") {
 		t.Errorf("logs = %q, want authentication without a client key", logs.String())
+	}
+}
+
+func TestDialSSHTriesPasswordBeforeClientKey(t *testing.T) {
+	keyPath, clientKey := newTestClientKeyFile(t)
+	checkPassword := func(_ ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+		if string(password) != "secret" {
+			return nil, errors.New("invalid password")
+		}
+		return nil, nil
+	}
+
+	tests := []struct {
+		name     string
+		server   ssh.ServerConfig
+		password string
+		wantLog  string
+	}{
+		{
+			name:     "accepted password leaves the key unused",
+			server:   ssh.ServerConfig{PasswordCallback: checkPassword, PublicKeyCallback: acceptPublicKey(clientKey)},
+			password: "secret",
+			wantLog:  "Authenticated without a client key",
+		},
+		{
+			name:     "rejected password falls through to the key",
+			server:   ssh.ServerConfig{PasswordCallback: checkPassword, PublicKeyCallback: acceptPublicKey(clientKey)},
+			password: "wrong",
+			wantLog:  "Authenticated with client key " + keyPath,
+		},
+		{
+			name:     "server without password login uses the key",
+			server:   ssh.ServerConfig{PublicKeyCallback: acceptPublicKey(clientKey)},
+			password: "secret",
+			wantLog:  "Authenticated with client key " + keyPath,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := authDialConfig(t, &tt.server)
+			cfg.SSHPassword = tt.password
+			cfg.SSHKeyFile = keyPath
+			logs := captureLogs(t)
+
+			dialAndClose(t, &cfg)
+
+			if !strings.Contains(logs.String(), tt.wantLog) {
+				t.Errorf("logs = %q, want them to contain %q", logs.String(), tt.wantLog)
+			}
+		})
 	}
 }
 

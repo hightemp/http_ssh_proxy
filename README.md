@@ -68,9 +68,11 @@ ssh_host: ssh.example.com
 ssh_user: proxy
 # ssh_reconnect_attempts: 3
 
-# Set ssh_key_file, ssh_pass, or both. With neither, the proxy offers every usable
-# key among ~/.ssh/id_ed25519, id_ecdsa and id_rsa. Passphrase-protected keys are
-# skipped. A leading ~/ is expanded here and in ssh_known_hosts_file.
+# Set ssh_key_file, ssh_pass, or both. With both, the password is tried first, and
+# the key is used only if the server rejects the password or does not allow it.
+# With neither, the proxy offers every usable key among ~/.ssh/id_ed25519, id_ecdsa
+# and id_rsa. Passphrase-protected keys are skipped. A leading ~/ is expanded here
+# and in ssh_known_hosts_file.
 # ssh_key_file: ~/.ssh/id_ed25519
 # ssh_pass: ""
 
