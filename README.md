@@ -61,10 +61,10 @@ ssh_host: "ssh.example.com"
 ssh_port: 22
 ssh_user: "proxy"
 ssh_pass: ""                         # Password, private key, or both
-ssh_key_file: "/home/user/.ssh/id_ed25519"
+ssh_key_file: "~/.ssh/id_ed25519"    # With neither, default keys are searched
 ssh_reconnect_attempts: 3
 
-ssh_known_hosts_file: "/home/user/.ssh/known_hosts" # Exactly one verifier
+ssh_known_hosts_file: "~/.ssh/known_hosts" # Exactly one verifier
 # ssh_host_key_fingerprint: "SHA256:..."             # Alternative verifier
 
 # Required for proto: https
@@ -99,6 +99,13 @@ HTTP requests use native forward-proxy absolute-form. CONNECT tunnels use an
 HTTP CONNECT or SOCKS5 CONNECT handshake as appropriate. Hostnames sent through
 SOCKS are resolved by the SOCKS proxy. HTTPS upstream certificates are verified
 against the operating system trust store with TLS 1.2 or newer.
+
+If neither `ssh_key_file` nor `ssh_pass` is set, the proxy searches for
+`id_ed25519`, `id_ecdsa` and `id_rsa` in `~/.ssh` once at startup and offers every
+usable key in that order. Passphrase-protected or unreadable keys are skipped with
+a warning, and startup fails if none remains. A problem with an explicit
+`ssh_key_file` is always fatal and never falls back to these keys. A leading `~/`
+is expanded in `ssh_key_file` and `ssh_known_hosts_file`.
 
 Obtain the SSH host key or fingerprint through a trusted channel. Do not accept
 an unknown key from the same untrusted connection that the proxy will use.

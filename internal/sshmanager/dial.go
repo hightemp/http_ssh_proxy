@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"slices"
@@ -169,6 +170,13 @@ func dialSSH(ctx context.Context, cfg *config.Config) (*ssh.Client, error) {
 		}
 		auth = append(auth, ssh.PublicKeys(signer))
 	}
+	if len(cfg.SSHDefaultKeyFiles) > 0 {
+		signers, err := defaultClientKeySigners(cfg.SSHDefaultKeyFiles)
+		if err != nil {
+			return nil, err
+		}
+		auth = append(auth, ssh.PublicKeys(signers...))
+	}
 
 	sshConfig := &ssh.ClientConfig{
 		User:            cfg.SSHUser,
@@ -211,6 +219,29 @@ func dialSSH(ctx context.Context, cfg *config.Config) (*ssh.Client, error) {
 		return nil, errors.Join(rejected...)
 	}
 	return nil, fmt.Errorf("%w for %s: no supported host key type: %w", errHostKeyVerification, knownhosts.Normalize(address), unsupported)
+}
+
+// defaultClientKeySigners rereads the default client keys for each connection.
+// A key that stopped being usable since startup is skipped.
+func defaultClientKeySigners(paths []string) ([]ssh.Signer, error) {
+	var signers []ssh.Signer
+	for _, path := range paths {
+		key, err := os.ReadFile(path)
+		if err != nil {
+			log.Printf("[SSH] Skipping default client key %s: %v", path, err)
+			continue
+		}
+		signer, err := ssh.ParsePrivateKey(key)
+		if err != nil {
+			log.Printf("[SSH] Skipping default client key %s: %v", path, err)
+			continue
+		}
+		signers = append(signers, signer)
+	}
+	if len(signers) == 0 {
+		return nil, fmt.Errorf("no usable default SSH client key in %s", strings.Join(paths, ", "))
+	}
+	return signers, nil
 }
 
 func isHostKeyNegotiationError(err error) bool {

@@ -8,12 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log"
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
+	"golang.org/x/crypto/ssh"
 	"gopkg.in/yaml.v3"
 )
 
@@ -58,10 +62,20 @@ type Config struct {
 	SSHPassword string `yaml:"ssh_pass"`
 	SSHKeyFile  string `yaml:"ssh_key_file"`
 
+	// SSHDefaultKeyFiles lists the default client keys found by Load. They are
+	// used only when neither ssh_key_file nor ssh_pass is set.
+	SSHDefaultKeyFiles []string `yaml:"-"`
+	// checkedDefaultKeyFiles lists the paths searched for default client keys.
+	checkedDefaultKeyFiles []string
+
 	SSHKnownHostsFile     string `yaml:"ssh_known_hosts_file"`
 	SSHHostKeyFingerprint string `yaml:"ssh_host_key_fingerprint"`
 	SSHReconnectAttempts  int    `yaml:"ssh_reconnect_attempts"`
 }
+
+// defaultClientKeyNames lists default client key file names in the order they
+// are offered to the server.
+var defaultClientKeyNames = []string{"id_ed25519", "id_ecdsa", "id_rsa"}
 
 // Default returns a configuration with conservative local-only defaults.
 func Default() Config {
@@ -101,6 +115,9 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg.normalize()
+	if cfg.SSHKeyFile == "" && cfg.SSHPassword == "" {
+		cfg.findDefaultClientKeys()
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config file %q: %w", path, err)
 	}
@@ -194,8 +211,12 @@ func (cfg Config) Validate() error {
 		validationErrors = append(validationErrors, errors.New("ssh_user is required"))
 	}
 
-	if cfg.SSHPassword == "" && cfg.SSHKeyFile == "" {
-		validationErrors = append(validationErrors, errors.New("set ssh_pass or ssh_key_file for SSH authentication"))
+	if cfg.SSHPassword == "" && cfg.SSHKeyFile == "" && len(cfg.SSHDefaultKeyFiles) == 0 {
+		err := errors.New("set ssh_pass or ssh_key_file for SSH authentication")
+		if len(cfg.checkedDefaultKeyFiles) > 0 {
+			err = fmt.Errorf("%w: no usable default client key in %s", err, strings.Join(cfg.checkedDefaultKeyFiles, ", "))
+		}
+		validationErrors = append(validationErrors, err)
 	}
 	if cfg.SSHKeyFile != "" {
 		if err := validateRegularFile("ssh_key_file", cfg.SSHKeyFile); err != nil {
@@ -248,9 +269,53 @@ func (cfg *Config) normalize() {
 	}
 	cfg.SSHHost = strings.TrimSpace(cfg.SSHHost)
 	cfg.SSHUser = strings.TrimSpace(cfg.SSHUser)
-	cfg.SSHKeyFile = strings.TrimSpace(cfg.SSHKeyFile)
-	cfg.SSHKnownHostsFile = strings.TrimSpace(cfg.SSHKnownHostsFile)
+	cfg.SSHKeyFile = expandHome(strings.TrimSpace(cfg.SSHKeyFile))
+	cfg.SSHKnownHostsFile = expandHome(strings.TrimSpace(cfg.SSHKnownHostsFile))
 	cfg.SSHHostKeyFingerprint = strings.TrimSpace(cfg.SSHHostKeyFingerprint)
+}
+
+// expandHome expands a leading "~/". A path it cannot expand is left as is, so
+// validation reports it.
+func expandHome(path string) string {
+	rest, ok := strings.CutPrefix(path, "~/")
+	if !ok {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	return filepath.Join(home, filepath.FromSlash(rest))
+}
+
+// findDefaultClientKeys records the usable default client keys. A key that is
+// passphrase-protected or unreadable is skipped: the proxy may run as a service
+// and cannot prompt for a passphrase.
+func (cfg *Config) findDefaultClientKeys() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		log.Printf("[STARTUP] Cannot search for default SSH client keys: %v", err)
+		return
+	}
+	for _, name := range defaultClientKeyNames {
+		path := filepath.Join(home, ".ssh", name)
+		cfg.checkedDefaultKeyFiles = append(cfg.checkedDefaultKeyFiles, path)
+		contents, err := os.ReadFile(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err == nil {
+			_, err = ssh.ParsePrivateKey(contents)
+		}
+		if err != nil {
+			log.Printf("[STARTUP] Skipping default SSH client key %s: %v", path, err)
+			continue
+		}
+		cfg.SSHDefaultKeyFiles = append(cfg.SSHDefaultKeyFiles, path)
+	}
+	if len(cfg.SSHDefaultKeyFiles) > 0 {
+		log.Printf("[STARTUP] Using default SSH client keys: %s", strings.Join(cfg.SSHDefaultKeyFiles, ", "))
+	}
 }
 
 func validateUpstreamProxy(rawURL string, index int) error {
