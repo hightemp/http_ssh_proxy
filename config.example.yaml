@@ -2,9 +2,9 @@
 # show their default value, unless a comment says otherwise.
 
 # listen_addr: 127.0.0.1:8888
-# username: ""
+# username: ""  # Set both username and password, or neither
 # password: ""
-# proto: http
+# proto: http  # http or https
 
 # Resource and shutdown limits.
 # max_connections: 128
@@ -16,7 +16,7 @@
 # which is empty by default. Supported schemes: http, https, socks (SOCKS5
 # alias), socks5, and socks5h.
 # upstreams_enabled: false
-# upstream_strategy: roundrobin
+# upstream_strategy: roundrobin  # roundrobin or random
 # upstreams:
 #   - http://user:password@proxy-a.example.com:3128
 #   - https://user:password@proxy-b.example.com:443
