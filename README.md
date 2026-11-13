@@ -75,7 +75,7 @@ ssh_known_hosts_file: "/home/user/.ssh/known_hosts" # Exactly one verifier
 The loader rejects unknown fields, multiple YAML documents, invalid addresses
 and ports, missing SSH authentication, unreadable key files, invalid TLS
 certificate/key pairs, and ambiguous host-key verification. A non-loopback
-listener is accepted only with HTTPS and both proxy credentials configured.
+listener is accepted only with both proxy credentials configured.
 
 When `upstreams_enabled: true`, the connection chain is:
 

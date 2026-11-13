@@ -128,9 +128,6 @@ func (cfg Config) Validate() error {
 	}
 
 	if listenErr == nil && !isLoopbackHost(listenHost) {
-		if cfg.Proto != "https" {
-			validationErrors = append(validationErrors, errors.New("a non-loopback listen_addr requires proto: https"))
-		}
 		if !proxyUserSet || !proxyPasswordSet {
 			validationErrors = append(validationErrors, errors.New("a non-loopback listen_addr requires username and password"))
 		}

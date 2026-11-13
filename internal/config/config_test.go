@@ -172,6 +172,17 @@ func TestValidateAcceptsSafeLoopbackConfiguration(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsPublicPlaintextListenerWithAuth(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.ProxyAddr = "0.0.0.0:8888"
+	cfg.Proto = "http"
+	cfg.Username = "proxy"
+	cfg.Password = "secret"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func TestValidateRejectsUnsafeOrIncompleteConfiguration(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -227,9 +238,9 @@ func TestValidateRejectsUnsafeOrIncompleteConfiguration(t *testing.T) {
 			wantErr: "username and password must either both be set",
 		},
 		{
-			name:    "public plaintext listener",
+			name:    "public plaintext listener without authentication",
 			change:  func(cfg *Config) { cfg.ProxyAddr = "0.0.0.0:8888" },
-			wantErr: "non-loopback listen_addr requires proto: https",
+			wantErr: "non-loopback listen_addr requires username and password",
 		},
 		{
 			name: "public listener without authentication",
