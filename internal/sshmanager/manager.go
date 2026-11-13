@@ -386,13 +386,25 @@ type limitedConn struct {
 	net.Conn
 	releaseOnce sync.Once
 	release     func()
+	deadlines   *channelDeadlines
 }
 
 func newLimitedConn(conn net.Conn, release func()) *limitedConn {
-	return &limitedConn{Conn: conn, release: release}
+	limited := &limitedConn{Conn: conn, release: release}
+	if _, ok := conn.(ssh.Channel); ok {
+		limited.deadlines = &channelDeadlines{onExpire: func() {
+			if err := limited.Close(); err != nil {
+				log.Printf("[SSH] Close deadline-expired channel: %v", err)
+			}
+		}}
+	}
+	return limited
 }
 
 func (c *limitedConn) Close() error {
+	if c.deadlines != nil {
+		c.deadlines.stop()
+	}
 	err := c.Conn.Close()
 	c.releaseOnce.Do(c.release)
 	return err
