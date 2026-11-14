@@ -156,8 +156,14 @@ func (e *proxyEndpoint) DialContext(ctx context.Context, network, target string)
 	})
 	fail := func(operationErr error) (net.Conn, error) {
 		stopCancelClose()
-		if ctx.Err() != nil {
-			operationErr = ctx.Err()
+		if contextErr := ctx.Err(); contextErr != nil {
+			operationErr = contextErr
+		} else if contextDeadline, ok := ctx.Deadline(); ok && !time.Now().Before(contextDeadline) {
+			// The socket timer can fire before the context timer publishes Err.
+			var timeoutErr net.Error
+			if errors.As(operationErr, &timeoutErr) && timeoutErr.Timeout() {
+				operationErr = context.DeadlineExceeded
+			}
 		}
 		return nil, closeProxyAfterError(conn, operationErr)
 	}

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +98,47 @@ func TestProxyEndpointReportsDeadlineSetupFailure(t *testing.T) {
 	if _, err := endpoint.DialContext(context.Background(), "tcp", "target.example:443"); !errors.Is(err, wantErr) {
 		t.Fatalf("DialContext() error = %v, want deadline error", err)
 	}
+}
+
+func TestUpstreamHandshakeContextDeadlineRace(t *testing.T) {
+	wantFailure := errors.New("handshake failed")
+	tests := []struct {
+		name     string
+		deadline time.Time
+		writeErr error
+		wantErr  error
+	}{
+		{name: "elapsed deadline", deadline: time.Now().Add(-time.Second), writeErr: os.ErrDeadlineExceeded, wantErr: context.DeadlineExceeded},
+		{name: "future deadline", deadline: time.Now().Add(time.Hour), writeErr: os.ErrDeadlineExceeded, wantErr: os.ErrDeadlineExceeded},
+		{name: "no deadline", writeErr: os.ErrDeadlineExceeded, wantErr: os.ErrDeadlineExceeded},
+		{name: "unrelated failure", deadline: time.Now().Add(-time.Second), writeErr: wantFailure, wantErr: wantFailure},
+	}
+	for _, scheme := range []string{"http", "https", "socks5"} {
+		for _, tt := range tests {
+			t.Run(scheme+"/"+tt.name, func(t *testing.T) {
+				conn := &faultConn{Conn: newMemoryConn(nil), write: func([]byte) (int, error) { return 0, tt.writeErr }}
+				endpoint, err := newProxyEndpoint(&fakeDialer{conn: conn}, scheme+"://proxy.example:1080", nil)
+				if err != nil {
+					t.Fatalf("newProxyEndpoint() error = %v", err)
+				}
+				// Model the interval after the socket deadline fires but before
+				// the context timer publishes its cancellation.
+				ctx := pendingDeadlineContext{Context: context.Background(), deadline: tt.deadline}
+				if _, err := endpoint.DialContext(ctx, "tcp", "target.example:443"); !errors.Is(err, tt.wantErr) {
+					t.Fatalf("DialContext() error = %v, want %v", err, tt.wantErr)
+				}
+			})
+		}
+	}
+}
+
+type pendingDeadlineContext struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c pendingDeadlineContext) Deadline() (time.Time, bool) {
+	return c.deadline, !c.deadline.IsZero()
 }
 
 func TestSOCKS5ConnectRequestAddressTypes(t *testing.T) {
