@@ -25,10 +25,10 @@ graceful shutdown.
 
 ## Requirements
 
-- Go 1.26.6 or later when building from source.
+- Go 1.26.11 or later when building from source.
 - An SSH server that permits TCP forwarding.
 - A trusted SSH host key verifier and at least one SSH authentication method.
-- A TLS certificate when exposing the proxy beyond the loopback interface.
+- A TLS certificate when using `proto: https`.
 
 ## Configuration
 
