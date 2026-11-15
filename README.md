@@ -231,40 +231,182 @@ verification.
 
 ## Docker
 
-Release tags publish a multi-platform image (`linux/amd64`, `linux/arm64`,
-`linux/arm/v7`) to `ghcr.io/hightemp/http_ssh_proxy` with tags `X.Y.Z`, `X.Y`,
-and `latest`, plus build provenance and SBOM attestations. The image is
-distroless, runs as a non-root user, and contains only the static binary.
+Every release publishes a multi-platform image to
+`ghcr.io/hightemp/http_ssh_proxy`:
+
+| | |
+| --- | --- |
+| Tags | `X.Y.Z`, `X.Y`, `latest` |
+| Platforms | `linux/amd64`, `linux/arm64`, `linux/arm/v7` (e.g. Raspberry Pi) |
+| Base | distroless static, non-root, only the static binary (~10 MB) |
+| Entrypoint | `/usr/local/bin/http_ssh_proxy -config /etc/http_ssh_proxy/config.yaml` |
+| Port | `8888` |
+| Supply chain | SBOM and build provenance attestations |
 
 ```bash
 docker pull ghcr.io/hightemp/http_ssh_proxy:latest
+docker run --rm ghcr.io/hightemp/http_ssh_proxy:latest -version
 gh attestation verify oci://ghcr.io/hightemp/http_ssh_proxy:latest --repo hightemp/http_ssh_proxy
 ```
 
-`docker-compose.yml` runs it with a read-only root filesystem, no capabilities,
-and the port published on `127.0.0.1:8888` only:
+### Prepare configuration and keys
+
+The container reads its configuration and SSH files from mounted host
+directories. Paths inside `config.yaml` are paths **inside the container**.
 
 ```bash
 mkdir -p docker/ssh
+cp docker/config.example.yaml docker/config.yaml   # set ssh_host, ssh_user, ...
 cp ~/.ssh/proxy_key docker/ssh/id_ed25519
-cp docker/config.example.yaml docker/config.yaml   # edit ssh_host, ssh_user, ...
 chmod 600 docker/config.yaml docker/ssh/id_ed25519
+```
+
+`docker/config.example.yaml` already uses `listen_addr: 0.0.0.0:8888`,
+`ssh_key_file: /etc/http_ssh_proxy/ssh/id_ed25519`, and
+`ssh_known_hosts_file: /etc/http_ssh_proxy/ssh/known_hosts`. `docker/config.yaml`,
+`docker/ssh/`, and `.env` are ignored by git.
+
+Add the SSH server key once, either interactively through the container
+(`-it` is needed for the confirmation prompt; `-yes` skips it) or by copying an
+entry you have already verified on the host:
+
+```bash
 docker compose run --rm http_ssh_proxy -config /etc/http_ssh_proxy/config.yaml -trust-host-key
+# or
+ssh-keygen -F ssh.example.com -f ~/.ssh/known_hosts | grep -v '^#' > docker/ssh/known_hosts
+```
+
+### Run with Docker Compose
+
+```bash
+cp .env.example .env        # optional: UID/GID, bind address, port, image tag
+docker compose run --rm http_ssh_proxy -config /etc/http_ssh_proxy/config.yaml -check-config
 docker compose up -d
+docker compose logs -f
 curl -x http://127.0.0.1:8888 https://example.com
 ```
 
-- `docker/config.yaml` and `docker/ssh/` are ignored by git. The container
-  config must listen on `0.0.0.0:8888`; choose external exposure through the
-  port mapping (`PROXY_BIND`, `PROXY_PORT`) instead.
-- The container runs as `PROXY_UID:PROXY_GID` (default `1000:1000`) so it can
-  read mode-0600 files owned by that host user. Set them to your `id -u` and
-  `id -g` if they differ.
-- `docker/ssh` is mounted read-write so `-trust-host-key` or
-  `ssh_known_hosts_accept_new` can record the server key.
-- `HTTP_SSH_PROXY_TAG` pins an image version; `docker compose build` builds
-  the image locally instead, and `make docker-build` builds and smoke-tests a
-  local image with version metadata.
+`docker-compose.yml` runs the proxy with a read-only root filesystem, no Linux
+capabilities, `no-new-privileges`, file-descriptor and PID limits, a 30 s stop
+grace period, and `restart: unless-stopped`. Settings from `.env`:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PROXY_UID` / `PROXY_GID` | `1000` | User the container runs as; must be able to read the mounted files |
+| `PROXY_BIND` | `127.0.0.1` | Host address of the published port |
+| `PROXY_PORT` | `8888` | Host port of the published port |
+| `HTTP_SSH_PROXY_TAG` | `latest` | Image tag to run |
+
+Update to a newer image with `docker compose pull && docker compose up -d`.
+`docker compose build` (or `make docker-build`, which also smoke-tests the
+result) builds the image from the local checkout instead.
+
+### Run with `docker run`
+
+```bash
+docker run -d --name http_ssh_proxy \
+  --restart unless-stopped \
+  --user "$(id -u):$(id -g)" \
+  --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  --stop-timeout 30 \
+  -p 127.0.0.1:8888:8888 \
+  -v "$PWD/docker/config.yaml:/etc/http_ssh_proxy/config.yaml:ro" \
+  -v "$PWD/docker/ssh:/etc/http_ssh_proxy/ssh" \
+  ghcr.io/hightemp/http_ssh_proxy:latest
+```
+
+One-off commands use the same mounts and pass flags after the image name,
+which replace the default `-config` argument:
+
+```bash
+docker run --rm -it --user "$(id -u):$(id -g)" \
+  -v "$PWD/docker/config.yaml:/etc/http_ssh_proxy/config.yaml:ro" \
+  -v "$PWD/docker/ssh:/etc/http_ssh_proxy/ssh" \
+  ghcr.io/hightemp/http_ssh_proxy:latest \
+  -config /etc/http_ssh_proxy/config.yaml -trust-host-key
+```
+
+### Common setups
+
+Use the proxy from other containers in the same Compose project without
+publishing a port; they reach it by service name:
+
+```yaml
+services:
+  app:
+    image: curlimages/curl
+    command: ["-x", "http://http_ssh_proxy:8888", "https://example.com"]
+    depends_on:
+      - http_ssh_proxy
+```
+
+Reach an SSH server running on the Docker host itself: `localhost` inside the
+container is the container, so map the host gateway and set
+`ssh_host: host.docker.internal`:
+
+```yaml
+services:
+  http_ssh_proxy:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+```
+
+Serve the proxy over TLS (`proto: https`): mount the certificate and key and
+reference the container paths in `config.yaml`:
+
+```yaml
+services:
+  http_ssh_proxy:
+    volumes:
+      - ./docker/tls:/etc/http_ssh_proxy/tls:ro
+```
+
+```yaml
+proto: https
+pem_path: /etc/http_ssh_proxy/tls/server.pem
+key_path: /etc/http_ssh_proxy/tls/server.key
+```
+
+### Docker nuances
+
+- **Listen on `0.0.0.0` inside the container.** With `listen_addr:
+  127.0.0.1:8888` the proxy only accepts connections from inside the container
+  and the published port does not work. Control exposure with the port mapping
+  (`PROXY_BIND`), not with `listen_addr`.
+- **Published ports bypass host firewalls such as UFW.** Docker inserts its own
+  iptables rules, so `PROXY_BIND=0.0.0.0` makes the proxy reachable from the
+  network even if UFW denies the port. Without `username`/`password` that is an
+  open proxy; configure credentials (and optionally stealth mode or
+  `proto: https`) before binding beyond `127.0.0.1`.
+- **File ownership.** The SSH key and config should stay mode `0600`, so the
+  container must run as their owner: set `PROXY_UID`/`PROXY_GID` (or
+  `--user`) to `id -u`/`id -g`. Otherwise startup fails with
+  `open ssh_key_file ...: permission denied`.
+- **Rootless Docker and Podman** remap user IDs. In rootless Docker, container
+  UID `0` is your host user, so use `PROXY_UID=0 PROXY_GID=0`; with Podman use
+  `--userns=keep-id` and your own UID.
+- **known_hosts must be writable for trust.** `-trust-host-key` and
+  `ssh_known_hosts_accept_new` write to `docker/ssh/known_hosts`, which is why
+  `docker/ssh` is mounted without `:ro`. Entries must match `ssh_host` exactly
+  as written in the container config (for example `host.docker.internal`).
+- **Read-only root filesystem.** The proxy writes nothing besides known_hosts,
+  so `read_only: true` is safe; keep any other file you add on a mount.
+- **Graceful shutdown needs more than Docker's default 10 s.** The proxy drains
+  CONNECT tunnels for `shutdown_timeout_seconds` (15 s by default) after
+  `SIGTERM`. Compose sets `stop_grace_period: 30s`; with `docker run` use
+  `--stop-timeout 30`, and raise it if you raise the shutdown timeout.
+- **No shell in the image.** `docker exec ... sh` is not available. Inspect the
+  setup with `docker compose logs`, `-check-config`, and `-version` runs.
+- **No health endpoint.** The image has no `HEALTHCHECK`. The process exits
+  when the configuration is invalid or the initial SSH connection fails
+  (including host key verification), and `restart: unless-stopped` retries it,
+  so a restart loop in `docker compose ps` usually means a configuration or
+  host key problem shown in the logs. Later SSH drops are reconnected in place.
+- **Logs go to stdout.** They never contain passwords or keys but do include
+  client addresses and request targets; configure Docker log rotation
+  (`logging: options: max-size`) for long-running deployments.
+- **Pin versions in production.** Use `HTTP_SSH_PROXY_TAG=X.Y.Z` or an image
+  digest instead of `latest`, and verify it with `gh attestation verify`.
 
 ## Systemd installation
 

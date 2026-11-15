@@ -10,3 +10,4 @@
 
 /docker/config.yaml
 /docker/ssh/
+/.env
