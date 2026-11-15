@@ -74,8 +74,11 @@ ssh_known_hosts_file: "/home/user/.ssh/known_hosts" # Exactly one verifier
 
 The loader rejects unknown fields, multiple YAML documents, invalid addresses
 and ports, missing SSH authentication, unreadable key files, invalid TLS
-certificate/key pairs, and ambiguous host-key verification. A non-loopback
-listener is accepted only with both proxy credentials configured.
+certificate/key pairs, and ambiguous host-key verification. Proxy credentials
+are optional on any listener; when `listen_addr` is reachable from other hosts,
+set `username` and `password` (preferably with `proto: https`) or restrict
+access with a firewall, otherwise anyone who can reach the port can use the
+proxy.
 
 When `upstreams_enabled: true`, the connection chain is:
 
@@ -102,6 +105,22 @@ against the operating system trust store with TLS 1.2 or newer.
 
 Obtain the SSH host key or fingerprint through a trusted channel. Do not accept
 an unknown key from the same untrusted connection that the proxy will use.
+
+A host key verification failure is permanent: the proxy reports the host, the
+`known_hosts` file, and the SHA256 fingerprints involved, then stops without
+retrying. The `known_hosts` entry must match `ssh_host` exactly (use
+`[host]:port` for non-default ports). After changing `ssh_host`, add the new
+server to the configured file, for example by copying an entry you have already
+verified:
+
+```bash
+ssh-keygen -F 203.0.113.10 -f ~/.ssh/known_hosts | grep -v '^#' >> /path/to/proxy_known_hosts
+```
+
+With `ssh_known_hosts_file`, only the key types listed for the host are offered
+during key exchange, so listing just one of the server's key types is enough. A
+pinned `ssh_host_key_fingerprint` must belong to the key type the server
+negotiates; the mismatch error names that type.
 
 ### TLS certificate helper
 
@@ -235,7 +254,7 @@ possible.
 ## Security model and limitations
 
 - This is an HTTP/HTTPS forward proxy, not a SOCKS proxy or a reverse proxy.
-- Basic proxy credentials are protected in transit only when the client connects over TLS; plaintext HTTP is restricted to loopback by validation.
+- Basic proxy credentials are protected in transit only when the client connects over TLS; a listener without credentials is an open proxy for everyone who can reach it.
 - With upstreams disabled, destination traffic exits from the SSH server. When enabled, the SSH server connects to the selected proxy and destination traffic exits there; both environments' routing and audit policies apply.
 - Credentials sent to an `http` or SOCKS upstream are protected by SSH only up to the SSH server; use an HTTPS upstream or a trusted network between the SSH server and upstream proxy when credential confidentiality matters.
 - All requests share one managed SSH client; limits prevent unbounded resource use, but one SSH endpoint remains a dependency and bottleneck.

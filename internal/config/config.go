@@ -112,8 +112,7 @@ func Load(path string) (*Config, error) {
 func (cfg Config) Validate() error {
 	var validationErrors []error
 
-	_, listenErr := validateListenAddress(cfg.ProxyAddr)
-	if listenErr != nil {
+	if listenErr := validateListenAddress(cfg.ProxyAddr); listenErr != nil {
 		validationErrors = append(validationErrors, listenErr)
 	}
 
@@ -288,25 +287,17 @@ func validateUpstreamProxy(rawURL string, index int) error {
 	return nil
 }
 
-func validateListenAddress(address string) (string, error) {
-	host, portText, err := net.SplitHostPort(address)
+func validateListenAddress(address string) error {
+	_, portText, err := net.SplitHostPort(address)
 	if err != nil {
-		return "", fmt.Errorf("listen_addr %q must be in host:port form: %w", address, err)
+		return fmt.Errorf("listen_addr %q must be in host:port form: %w", address, err)
 	}
 
 	port, err := strconv.Atoi(portText)
 	if err != nil || port < 1 || port > 65535 {
-		return "", fmt.Errorf("listen_addr port must be between 1 and 65535, got %q", portText)
+		return fmt.Errorf("listen_addr port must be between 1 and 65535, got %q", portText)
 	}
-	return host, nil
-}
-
-func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return nil
 }
 
 func validateRegularFile(field, path string) error {

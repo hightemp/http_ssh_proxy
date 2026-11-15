@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -50,18 +52,25 @@ func TestHostKeyCallbackFingerprint(t *testing.T) {
 	hostKey := newTestHostKey(t)
 	fingerprint := ssh.FingerprintSHA256(hostKey)
 
-	callback, err := hostKeyCallback(&config.Config{SSHHostKeyFingerprint: fingerprint})
+	verifier, err := newHostKeyVerifier(&config.Config{SSHHostKeyFingerprint: fingerprint})
 	if err != nil {
-		t.Fatalf("hostKeyCallback() error = %v", err)
+		t.Fatalf("newHostKeyVerifier() error = %v", err)
 	}
+	callback := verifier.callback
 
 	if err := callback("ssh.example.com:22", nil, hostKey); err != nil {
 		t.Errorf("callback() rejected matching key: %v", err)
 	}
 
 	otherKey := newTestHostKey(t)
-	if err := callback("ssh.example.com:22", nil, otherKey); err == nil {
-		t.Error("callback() accepted a key with a different fingerprint")
+	err = callback("ssh.example.com:22", nil, otherKey)
+	if !isHostKeyError(err) {
+		t.Fatalf("callback() error = %v, want a host key error", err)
+	}
+	for _, want := range []string{"ssh.example.com:22", fingerprint, ssh.FingerprintSHA256(otherKey), "ssh-ed25519"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("callback() error = %q, want it to mention %q", err, want)
+		}
 	}
 }
 
@@ -73,10 +82,11 @@ func TestHostKeyCallbackKnownHosts(t *testing.T) {
 		t.Fatalf("write known_hosts: %v", err)
 	}
 
-	callback, err := hostKeyCallback(&config.Config{SSHKnownHostsFile: knownHostsPath})
+	verifier, err := newHostKeyVerifier(&config.Config{SSHKnownHostsFile: knownHostsPath})
 	if err != nil {
-		t.Fatalf("hostKeyCallback() error = %v", err)
+		t.Fatalf("newHostKeyVerifier() error = %v", err)
 	}
+	callback := verifier.callback
 
 	remote := &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 22}
 	if err := callback("ssh.example.com:22", remote, hostKey); err != nil {
@@ -87,6 +97,144 @@ func TestHostKeyCallbackKnownHosts(t *testing.T) {
 		t.Error("callback() accepted an unknown host key")
 	}
 }
+
+func TestKnownHostsErrorsAreDescriptive(t *testing.T) {
+	knownKey := newTestHostKey(t)
+	revokedKey := newTestHostKey(t)
+	presentedKey := newTestHostKey(t)
+	knownHostsPath := filepath.Join(t.TempDir(), "known_hosts")
+	contents := knownhosts.Line([]string{"ssh.example.com"}, knownKey) + "\n" +
+		"@revoked * " + string(ssh.MarshalAuthorizedKey(revokedKey))
+	if err := os.WriteFile(knownHostsPath, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+	verifier, err := newHostKeyVerifier(&config.Config{SSHKnownHostsFile: knownHostsPath})
+	if err != nil {
+		t.Fatalf("newHostKeyVerifier() error = %v", err)
+	}
+	remote := &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 22}
+
+	tests := []struct {
+		name      string
+		hostname  string
+		remote    net.Addr
+		key       ssh.PublicKey
+		wantCause any
+		want      []string
+	}{
+		{
+			name:      "unknown host",
+			hostname:  "other.example.com:22",
+			remote:    remote,
+			key:       presentedKey,
+			wantCause: new(*knownhosts.KeyError),
+			want:      []string{"not listed", "other.example.com:22", knownHostsPath, ssh.FingerprintSHA256(presentedKey)},
+		},
+		{
+			name:      "key mismatch",
+			hostname:  "ssh.example.com:22",
+			remote:    remote,
+			key:       presentedKey,
+			wantCause: new(*knownhosts.KeyError),
+			want: []string{
+				"mismatch", ssh.FingerprintSHA256(presentedKey), ssh.FingerprintSHA256(knownKey),
+				knownHostsPath + ":1",
+			},
+		},
+		{
+			name:      "revoked key",
+			hostname:  "ssh.example.com:22",
+			remote:    remote,
+			key:       revokedKey,
+			wantCause: new(*knownhosts.RevokedError),
+			want:      []string{"revoked", ssh.FingerprintSHA256(revokedKey), knownHostsPath + ":2"},
+		},
+		{
+			name:     "invalid remote address",
+			hostname: "ssh.example.com:22",
+			remote:   fakeAddr("not-a-host-port"),
+			key:      presentedKey,
+			want:     []string{"verification for ssh.example.com:22 failed"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := verifier.callback(tt.hostname, tt.remote, tt.key)
+			if !isHostKeyError(err) {
+				t.Fatalf("callback() error = %v, want a host key error", err)
+			}
+			if tt.wantCause != nil && !errors.As(err, tt.wantCause) {
+				t.Errorf("callback() error = %v, want cause %T", err, tt.wantCause)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("callback() error = %q, want it to mention %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestKnownHostAlgorithms(t *testing.T) {
+	ed25519Key := newTestHostKey(t)
+	rsaKey := newTestRSAHostKey(t)
+	knownHostsPath := filepath.Join(t.TempDir(), "known_hosts")
+	contents := knownhosts.Line([]string{"ssh.example.com"}, ed25519Key) + "\n" +
+		knownhosts.Line([]string{"ssh.example.com"}, rsaKey) + "\n" +
+		knownhosts.Line([]string{"ssh.example.com"}, newTestHostKey(t)) + "\n" +
+		"@cert-authority ca.example.com " + string(ssh.MarshalAuthorizedKey(newTestHostKey(t)))
+	if err := os.WriteFile(knownHostsPath, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+	verifier, err := newHostKeyVerifier(&config.Config{SSHKnownHostsFile: knownHostsPath})
+	if err != nil {
+		t.Fatalf("newHostKeyVerifier() error = %v", err)
+	}
+	remote := &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 22}
+
+	tests := []struct {
+		name    string
+		address string
+		remote  net.Addr
+		want    []string
+	}{
+		{
+			name:    "listed key types in file order",
+			address: "ssh.example.com:22",
+			remote:  remote,
+			want:    []string{ssh.KeyAlgoED25519, ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA},
+		},
+		{name: "unknown host keeps defaults", address: "other.example.com:22", remote: remote},
+		{name: "certificate authority only keeps defaults", address: "ca.example.com:22", remote: remote},
+		{name: "verifier error keeps defaults", address: "ssh.example.com:22", remote: fakeAddr("invalid")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := verifier.algorithms(tt.address, tt.remote)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("algorithms() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFingerprintVerifierKeepsDefaultAlgorithms(t *testing.T) {
+	verifier, err := newHostKeyVerifier(&config.Config{SSHHostKeyFingerprint: ssh.FingerprintSHA256(newTestHostKey(t))})
+	if err != nil {
+		t.Fatalf("newHostKeyVerifier() error = %v", err)
+	}
+	if verifier.algorithms != nil {
+		t.Error("fingerprint verifier restricts host key algorithms, want library defaults")
+	}
+}
+
+type fakeAddr string
+
+func (a fakeAddr) Network() string { return "tcp" }
+
+func (a fakeAddr) String() string { return string(a) }
 
 func TestHostKeyCallbackRejectsInvalidConfiguration(t *testing.T) {
 	tests := []struct {
@@ -125,9 +273,9 @@ func TestHostKeyCallbackRejectsInvalidConfiguration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := hostKeyCallback(&tt.cfg)
+			_, err := newHostKeyVerifier(&tt.cfg)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("hostKeyCallback() error = %v, want an error containing %q", err, tt.wantErr)
+				t.Fatalf("newHostKeyVerifier() error = %v, want an error containing %q", err, tt.wantErr)
 			}
 		})
 	}
@@ -255,6 +403,14 @@ func TestCloseAfterErrorJoinsCloseFailure(t *testing.T) {
 	}
 }
 
+func TestCloseAfterErrorIgnoresAlreadyClosedConnection(t *testing.T) {
+	operationErr := errors.New("operation failed")
+	err := closeAfterError(errorCloser{err: fmt.Errorf("close tcp: %w", net.ErrClosed)}, operationErr)
+	if !errors.Is(err, operationErr) || errors.Is(err, net.ErrClosed) {
+		t.Fatalf("closeAfterError() = %v, want only the operation error", err)
+	}
+}
+
 type errorCloser struct {
 	err error
 }
@@ -283,6 +439,21 @@ func newTestHostKey(t *testing.T) ssh.PublicKey {
 	hostKey, err := ssh.NewPublicKey(publicKey)
 	if err != nil {
 		t.Fatalf("convert host key: %v", err)
+	}
+	return hostKey
+}
+
+func newTestRSAHostKey(t *testing.T) ssh.PublicKey {
+	t.Helper()
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA host key: %v", err)
+	}
+
+	hostKey, err := ssh.NewPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("convert RSA host key: %v", err)
 	}
 	return hostKey
 }

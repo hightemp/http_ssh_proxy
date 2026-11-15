@@ -2,12 +2,16 @@ package sshmanager
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +21,7 @@ import (
 	"github.com/hightemp/http_ssh_proxy/internal/config"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 func TestManagerConnectAndForwardIntegration(t *testing.T) {
@@ -72,6 +77,82 @@ func TestManagerConnectAndForwardIntegration(t *testing.T) {
 	}
 }
 
+func TestDialSSHKnownHostsIntegration(t *testing.T) {
+	// The client prefers ECDSA over Ed25519 by default, so a server offering
+	// both while known_hosts lists only Ed25519 used to fail with a mismatch.
+	ecdsaPrivate, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ECDSA host key: %v", err)
+	}
+	ecdsaSigner, err := ssh.NewSignerFromKey(ecdsaPrivate)
+	if err != nil {
+		t.Fatalf("create ECDSA host signer: %v", err)
+	}
+	sshServer := newTestSSHServer(t, "proxy", "secret", ecdsaSigner)
+	t.Cleanup(sshServer.close)
+
+	host, portText, err := net.SplitHostPort(sshServer.listener.Addr().String())
+	if err != nil {
+		t.Fatalf("split SSH address: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse SSH port: %v", err)
+	}
+	address := knownhosts.Normalize(sshServer.listener.Addr().String())
+
+	tests := []struct {
+		name       string
+		knownHosts string
+		wantErr    string
+	}{
+		{
+			name:       "only the non-preferred key type is listed",
+			knownHosts: knownhosts.Line([]string{address}, sshServer.hostKey.PublicKey()),
+		},
+		{
+			name:       "host is not listed",
+			knownHosts: knownhosts.Line([]string{"other.example.com"}, sshServer.hostKey.PublicKey()),
+			wantErr:    "is not listed in known_hosts file",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.SSHHost = host
+			cfg.SSHPort = port
+			cfg.SSHUser = "proxy"
+			cfg.SSHPassword = "secret"
+			cfg.SSHKnownHostsFile = filepath.Join(t.TempDir(), "known_hosts")
+			if err := os.WriteFile(cfg.SSHKnownHostsFile, []byte(tt.knownHosts+"\n"), 0o600); err != nil {
+				t.Fatalf("write known_hosts: %v", err)
+			}
+
+			client, err := dialSSH(context.Background(), &cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("dialSSH() error = %v", err)
+				}
+				if err := client.Close(); err != nil {
+					t.Errorf("close client: %v", err)
+				}
+				return
+			}
+			if client != nil {
+				_ = client.Close()
+				t.Fatal("dialSSH() returned a client, want host key failure")
+			}
+			if !isHostKeyError(err) || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("dialSSH() error = %v, want host key error containing %q", err, tt.wantErr)
+			}
+			if strings.Contains(err.Error(), "close after failure") {
+				t.Errorf("dialSSH() error = %v, want no spurious close failure", err)
+			}
+		})
+	}
+}
+
 func TestDialSSHRejectsInvalidCredentials(t *testing.T) {
 	sshServer := newTestSSHServer(t, "proxy", "correct-password")
 	t.Cleanup(sshServer.close)
@@ -116,7 +197,7 @@ type testSSHServer struct {
 	conns    map[net.Conn]struct{}
 }
 
-func newTestSSHServer(t *testing.T, username, password string) *testSSHServer {
+func newTestSSHServer(t *testing.T, username, password string, extraHostKeys ...ssh.Signer) *testSSHServer {
 	t.Helper()
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -145,6 +226,9 @@ func newTestSSHServer(t *testing.T, username, password string) *testSSHServer {
 		},
 	}
 	serverConfig.AddHostKey(hostKey)
+	for _, extra := range extraHostKeys {
+		serverConfig.AddHostKey(extra)
+	}
 	go server.serve(serverConfig)
 	return server
 }

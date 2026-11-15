@@ -275,6 +275,11 @@ func (m *Manager) reconnect(parent context.Context, failed *clientState) error {
 
 		lastErr = err
 		log.Printf("[SSH] Connect attempt %d failed: %v", attempt, err)
+		if isHostKeyError(err) {
+			// The server identity will not change between attempts; retrying
+			// only delays the failure and repeats a possible MITM handshake.
+			return fmt.Errorf("SSH connect failed: %w", err)
+		}
 		if attempt == m.attempts {
 			break
 		}

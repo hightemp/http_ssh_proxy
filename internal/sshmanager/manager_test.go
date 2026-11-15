@@ -125,6 +125,34 @@ func TestDialContextDoesNotReconnectDestinationFailure(t *testing.T) {
 	}
 }
 
+func TestConnectDoesNotRetryHostKeyFailure(t *testing.T) {
+	cfg := testManagerConfig(1)
+	cfg.SSHReconnectAttempts = 3
+	hostKeyErr := &hostKeyError{msg: "host key rejected", cause: errors.New("unknown host")}
+	var connectCalls atomic.Int64
+	manager := newManager(cfg, func(context.Context) (sshClient, error) {
+		connectCalls.Add(1)
+		return nil, hostKeyErr
+	})
+	manager.backoff = func(int) time.Duration {
+		t.Error("backoff called after a host key failure")
+		return 0
+	}
+	t.Cleanup(func() {
+		if err := manager.Close(); err != nil {
+			t.Errorf("close manager: %v", err)
+		}
+	})
+
+	err := manager.Connect(context.Background())
+	if !errors.Is(err, hostKeyErr) || !isHostKeyError(err) {
+		t.Fatalf("Connect() error = %v, want the host key error", err)
+	}
+	if got := connectCalls.Load(); got != 1 {
+		t.Errorf("connector calls = %d, want 1", got)
+	}
+}
+
 func TestDialContextEnforcesConnectionLimit(t *testing.T) {
 	var peersMu sync.Mutex
 	var peers []net.Conn
