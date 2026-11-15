@@ -16,7 +16,7 @@ graceful shutdown.
 - HTTP forwarding and HTTPS `CONNECT` tunneling over one managed SSH transport.
 - Optional HTTP, HTTPS, or SOCKS5 upstream proxies reached through the SSH tunnel.
 - Random or round-robin upstream selection for HTTP requests and CONNECT tunnels.
-- OpenSSH `known_hosts` verification or an explicitly pinned SHA256 host-key fingerprint.
+- OpenSSH `known_hosts` verification or an explicitly pinned SHA256 host-key fingerprint, with an interactive `-trust-host-key` command and optional accept-new recording of unknown hosts.
 - Optional TLS and Basic proxy authentication for clients.
 - Connection limits, CONNECT idle timeouts, bounded reconnects, and graceful shutdown.
 - Strict YAML validation with safe loopback defaults.
@@ -66,6 +66,7 @@ ssh_reconnect_attempts: 3
 
 ssh_known_hosts_file: "/home/user/.ssh/known_hosts" # Exactly one verifier
 # ssh_host_key_fingerprint: "SHA256:..."             # Alternative verifier
+# ssh_known_hosts_accept_new: false                  # Record unknown hosts automatically
 
 # Required for proto: https
 # pem_path: "./server.pem"
@@ -108,14 +109,30 @@ an unknown key from the same untrusted connection that the proxy will use.
 
 A host key verification failure is permanent: the proxy reports the host, the
 `known_hosts` file, and the SHA256 fingerprints involved, then stops without
-retrying. The `known_hosts` entry must match `ssh_host` exactly (use
-`[host]:port` for non-default ports). After changing `ssh_host`, add the new
-server to the configured file, for example by copying an entry you have already
-verified:
+retrying. Entries are matched against `ssh_host` exactly (`[host]:port` for
+non-default ports), so after changing `ssh_host` the new server must be added.
+
+To review and add the key of the configured server, run:
 
 ```bash
-ssh-keygen -F 203.0.113.10 -f ~/.ssh/known_hosts | grep -v '^#' >> /path/to/proxy_known_hosts
+http_ssh_proxy -config /etc/http_ssh_proxy/config.yaml -trust-host-key
 ```
+
+The command connects, stops the handshake before authentication, prints the
+presented key type and SHA256 fingerprint, and appends the key to
+`ssh_known_hosts_file` after you confirm (`-yes` skips the prompt). The file is
+created with mode `0600` if it does not exist. A key that conflicts with an
+existing entry is refused; remove the old entry with `ssh-keygen -R` first when
+the change is expected.
+
+Alternatively, `ssh_known_hosts_accept_new: true` records the key of a host
+that has no entry yet on the first connection and logs a warning, like OpenSSH
+`StrictHostKeyChecking=accept-new`. A changed or revoked key is still rejected.
+This trusts whatever server answers the first connection, so use it only on a
+network you trust for that moment. The systemd unit mounts home directories
+read-only; to let the service record keys there, add a drop-in such as
+`ReadWritePaths=/home/user/.ssh/http_ssh_proxy_known_hosts` (the file must
+exist), or run `-trust-host-key` manually instead.
 
 With `ssh_known_hosts_file`, only the key types listed for the host are offered
 during key exchange, so listing just one of the server's key types is enough. A

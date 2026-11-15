@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -60,7 +62,11 @@ type Config struct {
 
 	SSHKnownHostsFile     string `yaml:"ssh_known_hosts_file"`
 	SSHHostKeyFingerprint string `yaml:"ssh_host_key_fingerprint"`
-	SSHReconnectAttempts  int    `yaml:"ssh_reconnect_attempts"`
+	// SSHKnownHostsAcceptNew records the key of a host that is missing from
+	// ssh_known_hosts_file on first connection, like OpenSSH
+	// StrictHostKeyChecking=accept-new. Changed keys are still rejected.
+	SSHKnownHostsAcceptNew bool `yaml:"ssh_known_hosts_accept_new"`
+	SSHReconnectAttempts   int  `yaml:"ssh_reconnect_attempts"`
 }
 
 // Default returns a configuration with conservative local-only defaults.
@@ -78,8 +84,27 @@ func Default() Config {
 	}
 }
 
+// LoadOption adjusts validation performed by Load.
+type LoadOption func(*loadOptions)
+
+type loadOptions struct {
+	allowMissingKnownHostsFile bool
+}
+
+// AllowMissingKnownHostsFile accepts a configured ssh_known_hosts_file that
+// does not exist yet, as long as its directory does. Commands that create the
+// file, such as host key trust, use it.
+func AllowMissingKnownHostsFile() LoadOption {
+	return func(opts *loadOptions) { opts.allowMissingKnownHostsFile = true }
+}
+
 // Load reads one strict YAML document, applies defaults, and validates it.
-func Load(path string) (*Config, error) {
+func Load(path string, options ...LoadOption) (*Config, error) {
+	var opts loadOptions
+	for _, option := range options {
+		option(&opts)
+	}
+
 	contents, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config file %q: %w", path, err)
@@ -101,7 +126,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg.normalize()
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.validate(opts); err != nil {
 		return nil, fmt.Errorf("validate config file %q: %w", path, err)
 	}
 
@@ -110,6 +135,10 @@ func Load(path string) (*Config, error) {
 
 // Validate checks required fields, combinations, addresses, ports, and files.
 func (cfg Config) Validate() error {
+	return cfg.validate(loadOptions{})
+}
+
+func (cfg Config) validate(opts loadOptions) error {
 	var validationErrors []error
 
 	if listenErr := validateListenAddress(cfg.ProxyAddr); listenErr != nil {
@@ -199,12 +228,16 @@ func (cfg Config) Validate() error {
 	case cfg.SSHKnownHostsFile != "" && cfg.SSHHostKeyFingerprint != "":
 		validationErrors = append(validationErrors, errors.New("ssh_known_hosts_file and ssh_host_key_fingerprint are mutually exclusive"))
 	case cfg.SSHKnownHostsFile != "":
-		if err := validateRegularFile("ssh_known_hosts_file", cfg.SSHKnownHostsFile); err != nil {
+		allowMissing := cfg.SSHKnownHostsAcceptNew || opts.allowMissingKnownHostsFile
+		if err := validateKnownHostsFile(cfg.SSHKnownHostsFile, allowMissing); err != nil {
 			validationErrors = append(validationErrors, err)
 		}
 	default:
 		if err := ValidateSSHHostKeyFingerprint(cfg.SSHHostKeyFingerprint); err != nil {
 			validationErrors = append(validationErrors, err)
+		}
+		if cfg.SSHKnownHostsAcceptNew {
+			validationErrors = append(validationErrors, errors.New("ssh_known_hosts_accept_new requires ssh_known_hosts_file"))
 		}
 	}
 
@@ -298,6 +331,24 @@ func validateListenAddress(address string) error {
 		return fmt.Errorf("listen_addr port must be between 1 and 65535, got %q", portText)
 	}
 	return nil
+}
+
+// validateKnownHostsFile requires an existing regular file, or, when
+// allowMissing is set, a missing file inside an existing directory.
+func validateKnownHostsFile(path string, allowMissing bool) error {
+	const field = "ssh_known_hosts_file"
+	if _, err := os.Stat(path); allowMissing && errors.Is(err, fs.ErrNotExist) {
+		dir := filepath.Dir(path)
+		dirInfo, dirErr := os.Stat(dir)
+		if dirErr != nil {
+			return fmt.Errorf("%s directory %q: %w", field, dir, dirErr)
+		}
+		if !dirInfo.IsDir() {
+			return fmt.Errorf("%s directory %q is not a directory", field, dir)
+		}
+		return nil
+	}
+	return validateRegularFile(field, path)
 }
 
 func validateRegularFile(field, path string) error {

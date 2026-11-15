@@ -477,3 +477,93 @@ func writeTestConfig(t *testing.T, contents string) string {
 	}
 	return path
 }
+
+func TestValidateKnownHostsAcceptNew(t *testing.T) {
+	dir := t.TempDir()
+	regularFile := filepath.Join(dir, "regular")
+	if err := os.WriteFile(regularFile, nil, 0o600); err != nil {
+		t.Fatalf("write regular file: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		change  func(*Config)
+		wantErr string
+	}{
+		{
+			name: "missing file is created later",
+			change: func(cfg *Config) {
+				cfg.SSHKnownHostsFile = filepath.Join(dir, "known_hosts")
+				cfg.SSHKnownHostsAcceptNew = true
+			},
+		},
+		{
+			name: "missing file without accept-new",
+			change: func(cfg *Config) {
+				cfg.SSHKnownHostsFile = filepath.Join(dir, "known_hosts")
+			},
+			wantErr: "ssh_known_hosts_file",
+		},
+		{
+			name: "missing directory",
+			change: func(cfg *Config) {
+				cfg.SSHKnownHostsFile = filepath.Join(dir, "missing", "known_hosts")
+				cfg.SSHKnownHostsAcceptNew = true
+			},
+			wantErr: "ssh_known_hosts_file directory",
+		},
+		{
+			name: "parent is not a directory",
+			change: func(cfg *Config) {
+				cfg.SSHKnownHostsFile = filepath.Join(regularFile, "known_hosts")
+				cfg.SSHKnownHostsAcceptNew = true
+			},
+			wantErr: "ssh_known_hosts_file",
+		},
+		{
+			name: "fingerprint verifier",
+			change: func(cfg *Config) {
+				cfg.SSHHostKeyFingerprint = testFingerprint
+				cfg.SSHKnownHostsAcceptNew = true
+			},
+			wantErr: "ssh_known_hosts_accept_new requires ssh_known_hosts_file",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.SSHHostKeyFingerprint = ""
+			tt.change(&cfg)
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want an error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadAllowMissingKnownHostsFile(t *testing.T) {
+	knownHostsPath := filepath.Join(t.TempDir(), "known_hosts")
+	path := writeTestConfig(t, "ssh_host: ssh.example.com\n"+
+		"ssh_user: proxy\n"+
+		"ssh_pass: secret\n"+
+		"ssh_known_hosts_file: "+knownHostsPath+"\n")
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load() accepted a missing known_hosts file without the option")
+	}
+	cfg, err := Load(path, AllowMissingKnownHostsFile())
+	if err != nil {
+		t.Fatalf("Load(AllowMissingKnownHostsFile) error = %v", err)
+	}
+	if cfg.SSHKnownHostsFile != knownHostsPath || cfg.SSHKnownHostsAcceptNew {
+		t.Errorf("Load() = %+v, want known_hosts %q without accept-new", cfg, knownHostsPath)
+	}
+}

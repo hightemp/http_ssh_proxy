@@ -29,6 +29,10 @@ ssh_reconnect_attempts: 3
 # Configure exactly one SSH host key verifier.
 ssh_known_hosts_file: /home/user/.ssh/known_hosts
 # ssh_host_key_fingerprint: SHA256:REPLACE_WITH_SERVER_HOST_KEY_FINGERPRINT
+# Record keys of hosts missing from ssh_known_hosts_file on first connection
+# (like OpenSSH StrictHostKeyChecking=accept-new). Changed keys are still
+# rejected. Prefer `http_ssh_proxy -trust-host-key` to review the key first.
+# ssh_known_hosts_accept_new: false
 
 # Required only when proto is https.
 # pem_path: ./server.pem
