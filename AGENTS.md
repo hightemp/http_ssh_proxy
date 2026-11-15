@@ -24,6 +24,8 @@ security requirements. Do not weaken them for convenience.
 - `internal/logutil`: shared close/error logging helpers.
 - `.github/workflows`: CI, lint, and cross-platform release automation.
 - `Makefile`: the supported local build, verification, and release interface.
+- `Dockerfile`, `docker-compose.yml`, `docker/`: container image and compose
+  deployment; release tags publish the image to GHCR.
 
 If a `.codegraph/` directory exists, use `codegraph explore` before text search
 when locating symbols or understanding call paths. Otherwise use `rg` and

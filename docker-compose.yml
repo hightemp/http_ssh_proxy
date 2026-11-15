@@ -1,0 +1,33 @@
+# Usage:
+#   mkdir -p docker/ssh && cp ~/.ssh/<proxy key> docker/ssh/id_ed25519
+#   cp docker/config.example.yaml docker/config.yaml   # then edit it
+#   docker compose run --rm http_ssh_proxy -config /etc/http_ssh_proxy/config.yaml -trust-host-key
+#   docker compose up -d
+#
+# The container runs as PROXY_UID:PROXY_GID (default 1000:1000) so it can read
+# mode-0600 files owned by that host user in ./docker.
+services:
+  http_ssh_proxy:
+    image: ghcr.io/hightemp/http_ssh_proxy:${HTTP_SSH_PROXY_TAG:-latest}
+    build:
+      context: .
+    user: "${PROXY_UID:-1000}:${PROXY_GID:-1000}"
+    command: ["-config", "/etc/http_ssh_proxy/config.yaml"]
+    ports:
+      - "${PROXY_BIND:-127.0.0.1}:${PROXY_PORT:-8888}:8888"
+    volumes:
+      - ./docker/config.yaml:/etc/http_ssh_proxy/config.yaml:ro
+      - ./docker/ssh:/etc/http_ssh_proxy/ssh
+    restart: unless-stopped
+    # Longer than shutdown_timeout_seconds so active tunnels can drain.
+    stop_grace_period: 30s
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nofile:
+        soft: 16384
+        hard: 16384
+    pids_limit: 256

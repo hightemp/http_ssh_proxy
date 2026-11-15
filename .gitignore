@@ -7,3 +7,6 @@
 
 /PROJECT_AUDIT.md
 /PROJECT_REVIEW.md
+
+/docker/config.yaml
+/docker/ssh/

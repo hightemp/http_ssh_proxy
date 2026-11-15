@@ -14,14 +14,24 @@ BRANCH ?= main
 COVERAGE_FILE ?= coverage.out
 COVERAGE_MIN ?= 90
 GOVULNCHECK ?= govulncheck
+DOCKER ?= docker
+DOCKER_IMAGE ?= http_ssh_proxy:local
 
-.PHONY: build build-static test vet coverage fuzz module-check vulncheck check release rewrite-release-tag
+.PHONY: build build-static docker-build test vet coverage fuzz module-check vulncheck check release rewrite-release-tag
 
 build:
 	$(GOBUILD) -trimpath -ldflags "$(BUILD_LDFLAGS)" -o $(BINARY_NAME) -v ./cmd/http_ssh_proxy
 
 build-static:
 	CGO_ENABLED=0 GOOS=linux $(GOBUILD) -a -installsuffix cgo -trimpath -ldflags "-s -w $(BUILD_LDFLAGS)" -o $(BINARY_NAME)_static ./cmd/http_ssh_proxy
+
+docker-build:
+	$(DOCKER) build \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg COMMIT=$(COMMIT) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-t $(DOCKER_IMAGE) .
+	$(DOCKER) run --rm $(DOCKER_IMAGE) -version
 
 test:
 	$(GO) test -race ./...

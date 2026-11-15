@@ -229,6 +229,43 @@ temporary mode-0600 curl config instead of the process arguments:
 The script intentionally has no public default target and never disables TLS
 verification.
 
+## Docker
+
+Release tags publish a multi-platform image (`linux/amd64`, `linux/arm64`,
+`linux/arm/v7`) to `ghcr.io/hightemp/http_ssh_proxy` with tags `X.Y.Z`, `X.Y`,
+and `latest`, plus build provenance and SBOM attestations. The image is
+distroless, runs as a non-root user, and contains only the static binary.
+
+```bash
+docker pull ghcr.io/hightemp/http_ssh_proxy:latest
+gh attestation verify oci://ghcr.io/hightemp/http_ssh_proxy:latest --repo hightemp/http_ssh_proxy
+```
+
+`docker-compose.yml` runs it with a read-only root filesystem, no capabilities,
+and the port published on `127.0.0.1:8888` only:
+
+```bash
+mkdir -p docker/ssh
+cp ~/.ssh/proxy_key docker/ssh/id_ed25519
+cp docker/config.example.yaml docker/config.yaml   # edit ssh_host, ssh_user, ...
+chmod 600 docker/config.yaml docker/ssh/id_ed25519
+docker compose run --rm http_ssh_proxy -config /etc/http_ssh_proxy/config.yaml -trust-host-key
+docker compose up -d
+curl -x http://127.0.0.1:8888 https://example.com
+```
+
+- `docker/config.yaml` and `docker/ssh/` are ignored by git. The container
+  config must listen on `0.0.0.0:8888`; choose external exposure through the
+  port mapping (`PROXY_BIND`, `PROXY_PORT`) instead.
+- The container runs as `PROXY_UID:PROXY_GID` (default `1000:1000`) so it can
+  read mode-0600 files owned by that host user. Set them to your `id -u` and
+  `id -g` if they differ.
+- `docker/ssh` is mounted read-write so `-trust-host-key` or
+  `ssh_known_hosts_accept_new` can record the server key.
+- `HTTP_SSH_PROXY_TAG` pins an image version; `docker compose build` builds
+  the image locally instead, and `make docker-build` builds and smoke-tests a
+  local image with version metadata.
+
 ## Systemd installation
 
 After creating `config.yaml` next to the installer, run:

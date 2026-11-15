@@ -66,3 +66,43 @@ jobs:
 
       - name: Scan reachable vulnerabilities
         run: govulncheck ./...
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build all platforms
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build native image for smoke test
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          tags: http_ssh_proxy:ci
+          build-args: |
+            VERSION=ci
+            COMMIT=${{ github.sha }}
+          cache-from: type=gha
+
+      - name: Smoke-test image
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$(docker run --rm http_ssh_proxy:ci -version)"
+          printf '%s\n' "${output}"
+          grep -F "version=ci" <<< "${output}"
+          grep -F "commit=${GITHUB_SHA}" <<< "${output}"
+          test "$(docker inspect http_ssh_proxy:ci --format '{{.Config.User}}')" = "nonroot:nonroot"

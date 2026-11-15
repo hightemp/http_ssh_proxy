@@ -1,0 +1,8 @@
+# Only sources needed by the Dockerfile; never send local secrets to the build.
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/
+**/*_test.go
+**/testdata/

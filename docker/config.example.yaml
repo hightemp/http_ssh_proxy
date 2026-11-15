@@ -1,0 +1,29 @@
+# Container configuration for docker-compose.yml.
+# Copy to docker/config.yaml and keep it private (chmod 600).
+
+# Listen on all interfaces inside the container. docker-compose.yml publishes
+# the port on 127.0.0.1 only; widen the port mapping deliberately.
+listen_addr: 0.0.0.0:8888
+username: ""
+password: ""
+proto: http
+
+max_connections: 128
+tunnel_idle_timeout_seconds: 300
+shutdown_timeout_seconds: 15
+
+# stealth_enabled: false
+# stealth_server_header: nginx
+# stealth_auth_host: login.example
+
+ssh_host: ssh.example.com
+ssh_port: 22
+ssh_user: proxy
+ssh_key_file: /etc/http_ssh_proxy/ssh/id_ed25519
+ssh_reconnect_attempts: 3
+
+# docker/ssh is mounted read-write so -trust-host-key or accept-new can record
+# the server key. Add it with:
+#   docker compose run --rm http_ssh_proxy -config /etc/http_ssh_proxy/config.yaml -trust-host-key
+ssh_known_hosts_file: /etc/http_ssh_proxy/ssh/known_hosts
+# ssh_known_hosts_accept_new: false
