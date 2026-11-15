@@ -127,12 +127,6 @@ func (cfg Config) Validate() error {
 		validationErrors = append(validationErrors, errors.New("username and password must either both be set or both be empty"))
 	}
 
-	if listenErr == nil && !isLoopbackHost(listenHost) {
-		if !proxyUserSet || !proxyPasswordSet {
-			validationErrors = append(validationErrors, errors.New("a non-loopback listen_addr requires username and password"))
-		}
-	}
-
 	if cfg.Proto == "https" {
 		switch {
 		case cfg.CertPath == "" && cfg.KeyPath == "":
