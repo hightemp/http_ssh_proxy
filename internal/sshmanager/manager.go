@@ -18,8 +18,8 @@ import (
 const (
 	defaultMaxConnections     = 128
 	defaultReconnectAttempts  = 3
-	defaultKeepAliveInterval  = 30 * time.Second
-	defaultKeepAliveFailLimit = 3
+	defaultKeepAliveInterval  = 10 * time.Second
+	defaultKeepAliveFailLimit = 2
 )
 
 var (
@@ -135,20 +135,32 @@ func (m *Manager) DialContext(ctx context.Context, network, addr string) (net.Co
 	if dialErr == nil {
 		return newLimitedConn(conn, release), nil
 	}
+	if ctx.Err() != nil {
+		// Caller gave up; the transport is not at fault.
+		release()
+		return nil, ctx.Err()
+	}
 	if isDestinationDialError(dialErr) {
 		release()
 		return nil, fmt.Errorf("SSH destination dial to %s failed: %w", addr, dialErr)
 	}
 
 	log.Printf("[SSH] Dial to %s failed (%v), attempting reconnect", addr, dialErr)
-	if reconnectErr := m.reconnect(ctx, state); reconnectErr != nil {
+	reconnectCtx, reconnectCancel := m.linkContext(m.lifecycleCtx)
+	if reconnectErr := m.reconnect(reconnectCtx, state); reconnectErr != nil {
+		reconnectCancel()
 		release()
 		return nil, errors.Join(
 			fmt.Errorf("SSH dial to %s failed: %w", addr, dialErr),
 			fmt.Errorf("SSH reconnect failed: %w", reconnectErr),
 		)
 	}
+	reconnectCancel()
 
+	if ctx.Err() != nil {
+		release()
+		return nil, ctx.Err()
+	}
 	state, err = m.getClient(ctx)
 	if err != nil {
 		release()
