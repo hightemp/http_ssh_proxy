@@ -350,7 +350,7 @@ func TestWriteDialErrorMapsResourceLimit(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			writeDialError(recorder, tt.err)
+			(&Handler{}).writeDialError(recorder, tt.err)
 			if recorder.Code != tt.wantStatus {
 				t.Errorf("status = %d, want %d", recorder.Code, tt.wantStatus)
 			}

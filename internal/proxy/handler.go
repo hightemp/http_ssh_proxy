@@ -34,6 +34,8 @@ type Config struct {
 	Username          string
 	Password          string
 	TunnelIdleTimeout time.Duration
+	// Stealth hides the proxy from clients that do not authenticate.
+	Stealth StealthConfig
 }
 
 // UpstreamConfig controls proxy routing after the SSH tunnel. When Enabled is
@@ -85,7 +87,7 @@ func newHandler(cfg Config, route outbound) *Handler {
 		},
 		tunnels: make(map[*tunnel]struct{}),
 	}
-	h.serveHandler = panicRecoveryMiddleware(http.HandlerFunc(h.serveHTTP))
+	h.serveHandler = panicRecoveryMiddleware(http.HandlerFunc(h.serveHTTP), h.writeError)
 	return h
 }
 
@@ -138,13 +140,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.isClosing() {
-		http.Error(w, "Proxy is shutting down", http.StatusServiceUnavailable)
+		h.writeError(w, http.StatusServiceUnavailable, "Proxy is shutting down")
 		return
 	}
 
 	reqID := h.requestCounter.Add(1)
 	log.Printf("[REQ-%d] %s %s %s from %s", reqID, r.Method, r.Host, r.URL, r.RemoteAddr)
-	if h.config.Username != "" && !basicAuth(w, r, h.config, reqID) {
+	if h.config.Stealth.Enabled {
+		if !h.stealthAdmit(w, r, reqID) {
+			return
+		}
+	} else if h.config.Username != "" && !basicAuth(w, r, h.config, reqID) {
 		return
 	}
 

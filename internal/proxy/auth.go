@@ -12,27 +12,36 @@ import (
 const proxyAuthChallenge = `Basic realm="Proxy Authorization Required"`
 
 func basicAuth(w http.ResponseWriter, r *http.Request, cfg Config, reqID uint64) bool {
-	auth := r.Header.Get("Proxy-Authorization")
-	if auth == "" {
-		log.Printf("[REQ-%d] No Proxy-Authorization header", reqID)
-		writeProxyAuthRequired(w)
-		return false
-	}
-
-	username, password, ok := parseBasicProxyAuthorization(auth)
+	ok, reason := checkProxyAuthorization(r.Header.Get("Proxy-Authorization"), cfg)
 	if !ok {
-		log.Printf("[REQ-%d] Invalid Proxy-Authorization header", reqID)
+		log.Printf("[REQ-%d] Proxy authentication from %s failed: %s", reqID, r.RemoteAddr, reason)
 		writeProxyAuthRequired(w)
 		return false
 	}
-
-	if !credentialsMatch(username, password, cfg.Username, cfg.Password) {
-		log.Printf("[REQ-%d] Failed proxy authentication from %s", reqID, r.RemoteAddr)
-		writeProxyAuthRequired(w)
-		return false
-	}
-
 	return true
+}
+
+// checkProxyAuthorization validates a Proxy-Authorization header against cfg.
+// It always performs the constant-time credential comparison, even for a
+// missing or malformed header, so timing does not reveal the failure reason.
+// The returned reason is safe to log and never contains credentials.
+func checkProxyAuthorization(header string, cfg Config) (bool, string) {
+	reason := ""
+	username, password, parsed := "", "", false
+	if header == "" {
+		reason = "no Proxy-Authorization header"
+	} else if username, password, parsed = parseBasicProxyAuthorization(header); !parsed {
+		reason = "invalid Proxy-Authorization header"
+	}
+
+	matches := credentialsMatch(username, password, cfg.Username, cfg.Password)
+	if reason != "" {
+		return false, reason
+	}
+	if !matches {
+		return false, "invalid credentials"
+	}
+	return true, ""
 }
 
 func parseBasicProxyAuthorization(header string) (string, string, bool) {

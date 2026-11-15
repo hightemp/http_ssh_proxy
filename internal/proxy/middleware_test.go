@@ -10,7 +10,7 @@ import (
 func TestPanicRecoveryMiddleware(t *testing.T) {
 	handler := panicRecoveryMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic("sensitive panic detail")
-	}))
+	}), (&Handler{}).writeError)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://example.com", nil))
 

@@ -16,14 +16,14 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request, reqID uint6
 	outReq, err := outboundRequest(r)
 	if err != nil {
 		log.Printf("[REQ-%d] Invalid forward request: %v", reqID, err)
-		http.Error(w, "Invalid proxy request", http.StatusBadRequest)
+		h.writeError(w, http.StatusBadRequest, "Invalid proxy request")
 		return
 	}
 
 	resp, err := h.client.Do(outReq)
 	if err != nil {
 		log.Printf("[REQ-%d] Forward request to %s failed: %v", reqID, outReq.URL.Host, err)
-		writeDialError(w, err)
+		h.writeDialError(w, err)
 		return
 	}
 	defer logutil.Close(fmt.Sprintf("response body for request %d", reqID), resp.Body)
@@ -47,14 +47,14 @@ func (h *Handler) handleHTTP(w http.ResponseWriter, r *http.Request, reqID uint6
 	log.Printf("[REQ-%d] Completed %s %d (%d bytes)", reqID, outReq.URL.Host, resp.StatusCode, n)
 }
 
-func writeDialError(w http.ResponseWriter, err error) {
+func (h *Handler) writeDialError(w http.ResponseWriter, err error) {
 	var limit interface{ ResourceLimit() bool }
 	if errors.As(err, &limit) && limit.ResourceLimit() {
 		w.Header().Set("Retry-After", "1")
-		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		h.writeError(w, http.StatusServiceUnavailable, "Service Unavailable")
 		return
 	}
-	http.Error(w, "Bad Gateway", http.StatusBadGateway)
+	h.writeError(w, http.StatusBadGateway, "Bad Gateway")
 }
 
 func outboundRequest(in *http.Request) (*http.Request, error) {

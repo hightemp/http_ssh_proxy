@@ -44,6 +44,9 @@ listen_addr: "127.0.0.1:8888"
 username: ""                         # Set both fields or neither
 password: ""
 proto: "http"                        # http or https
+# stealth_enabled: false             # Look like a web server to strangers
+# stealth_server_header: "nginx"
+# stealth_auth_host: "login.example" # Secret host that still returns 407
 
 max_connections: 128
 tunnel_idle_timeout_seconds: 300
@@ -138,6 +141,33 @@ With `ssh_known_hosts_file`, only the key types listed for the host are offered
 during key exchange, so listing just one of the server's key types is enough. A
 pinned `ssh_host_key_fingerprint` must belong to the key type the server
 negotiates; the mismatch error names that type.
+
+### Stealth mode
+
+`stealth_enabled: true` makes the listener look like an ordinary web server to
+anyone who does not use it as an authenticated proxy:
+
+- Direct requests (`GET /`), proxy requests without credentials or with wrong
+  ones, and such CONNECT requests receive a `404 Not Found` HTML page with the
+  `stealth_server_header` (`nginx` by default; empty omits it) instead of
+  `407` or `400`.
+- Error responses (400, 500, 502, 503) use the same page style and never
+  mention the proxy, and a successful CONNECT answers `200 OK`.
+- Credentials are always evaluated, so response timing does not reveal whether
+  a password was missing or wrong.
+
+Without the `407` challenge, clients must send `Proxy-Authorization`
+preemptively. curl (`-x http://user:pass@host:port`) and most HTTP libraries do
+so. Browsers only send proxy credentials after a challenge, so set
+`stealth_auth_host` to a secret hostname (for example `login.example`; it
+requires `username` and `password`) and open `http://login.example/` once
+through the proxy: only requests to that host receive `407`, the browser asks
+for credentials, and afterwards sends them with every request for the session.
+
+Without proxy credentials, stealth mode only hides direct requests and error
+details; proxy requests are still served to anyone who can reach the port.
+Malformed HTTP that `net/http` rejects before reaching the handler still gets
+the Go server's plain `400 Bad Request`.
 
 ### TLS certificate helper
 
@@ -271,6 +301,7 @@ possible.
 ## Security model and limitations
 
 - This is an HTTP/HTTPS forward proxy, not a SOCKS proxy or a reverse proxy.
+- Stealth mode hides the proxy from casual scanners, not from an observer of the client traffic or from someone who knows the credentials or `stealth_auth_host`.
 - Basic proxy credentials are protected in transit only when the client connects over TLS; a listener without credentials is an open proxy for everyone who can reach it.
 - With upstreams disabled, destination traffic exits from the SSH server. When enabled, the SSH server connects to the selected proxy and destination traffic exits there; both environments' routing and audit policies apply.
 - Credentials sent to an `http` or SOCKS upstream are protected by SSH only up to the SSH server; use an HTTPS upstream or a trusted network between the SSH server and upstream proxy when credential confidentiality matters.

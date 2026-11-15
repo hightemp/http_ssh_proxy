@@ -567,3 +567,115 @@ func TestLoadAllowMissingKnownHostsFile(t *testing.T) {
 		t.Errorf("Load() = %+v, want known_hosts %q without accept-new", cfg, knownHostsPath)
 	}
 }
+
+func TestValidateStealth(t *testing.T) {
+	tests := []struct {
+		name    string
+		change  func(*Config)
+		wantErr string
+	}{
+		{name: "defaults", change: func(cfg *Config) { cfg.StealthEnabled = true }},
+		{
+			name: "auth host with credentials",
+			change: func(cfg *Config) {
+				cfg.StealthEnabled = true
+				cfg.StealthAuthHost = "login.proxy"
+				cfg.Username = "proxy"
+				cfg.Password = "secret"
+			},
+		},
+		{
+			name: "empty server header",
+			change: func(cfg *Config) {
+				cfg.StealthEnabled = true
+				cfg.StealthServerHeader = ""
+			},
+		},
+		{
+			name: "settings ignored while disabled",
+			change: func(cfg *Config) {
+				cfg.StealthAuthHost = "http://bad"
+				cfg.StealthServerHeader = "bad\nheader"
+			},
+		},
+		{
+			name: "auth host without credentials",
+			change: func(cfg *Config) {
+				cfg.StealthEnabled = true
+				cfg.StealthAuthHost = "login.proxy"
+			},
+			wantErr: "stealth_auth_host requires username and password",
+		},
+		{
+			name: "auth host with port",
+			change: func(cfg *Config) {
+				cfg.StealthEnabled = true
+				cfg.StealthAuthHost = "login.proxy:80"
+				cfg.Username = "proxy"
+				cfg.Password = "secret"
+			},
+			wantErr: "must be a bare hostname",
+		},
+		{
+			name: "auth host with leading dot",
+			change: func(cfg *Config) {
+				cfg.StealthEnabled = true
+				cfg.StealthAuthHost = ".proxy"
+				cfg.Username = "proxy"
+				cfg.Password = "secret"
+			},
+			wantErr: "must be a bare hostname",
+		},
+		{
+			name: "server header with control characters",
+			change: func(cfg *Config) {
+				cfg.StealthEnabled = true
+				cfg.StealthServerHeader = "nginx\r\nX-Injected: 1"
+			},
+			wantErr: "must not contain control characters",
+		},
+		{
+			name: "server header too long",
+			change: func(cfg *Config) {
+				cfg.StealthEnabled = true
+				cfg.StealthServerHeader = strings.Repeat("a", 129)
+			},
+			wantErr: "at most 128 bytes",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			tt.change(&cfg)
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want an error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadNormalizesStealthConfiguration(t *testing.T) {
+	path := writeTestConfig(t, "ssh_host: ssh.example.com\n"+
+		"ssh_user: proxy\n"+
+		"ssh_pass: secret\n"+
+		"ssh_host_key_fingerprint: "+testFingerprint+"\n"+
+		"username: proxy\n"+
+		"password: secret\n"+
+		"stealth_enabled: true\n"+
+		"stealth_auth_host: \" Login.Proxy \"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.StealthEnabled || cfg.StealthAuthHost != "login.proxy" || cfg.StealthServerHeader != "nginx" {
+		t.Errorf("Load() stealth = %t, %q, %q, want true, login.proxy, nginx",
+			cfg.StealthEnabled, cfg.StealthAuthHost, cfg.StealthServerHeader)
+	}
+}

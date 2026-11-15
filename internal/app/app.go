@@ -39,6 +39,11 @@ func run(ctx context.Context, cfg *config.Config, sshManager connectionManager) 
 		Username:          cfg.Username,
 		Password:          cfg.Password,
 		TunnelIdleTimeout: time.Duration(cfg.TunnelIdleTimeoutSeconds) * time.Second,
+		Stealth: proxy.StealthConfig{
+			Enabled:      cfg.StealthEnabled,
+			ServerHeader: cfg.StealthServerHeader,
+			AuthHost:     cfg.StealthAuthHost,
+		},
 	}, sshManager, proxy.UpstreamConfig{
 		Enabled:  cfg.UpstreamsEnabled,
 		Proxies:  cfg.Upstreams,

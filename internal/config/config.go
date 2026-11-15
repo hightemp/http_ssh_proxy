@@ -21,6 +21,8 @@ import (
 
 const (
 	defaultProxyAddr                = "127.0.0.1:8888"
+	defaultStealthServerHeader      = "nginx"
+	maxStealthServerHeaderLength    = 128
 	defaultSSHPort                  = 22
 	defaultProto                    = "http"
 	defaultUpstreamStrategy         = UpstreamStrategyRoundRobin
@@ -43,9 +45,18 @@ type Config struct {
 	ProxyAddr string `yaml:"listen_addr"`
 	Username  string `yaml:"username"`
 	Password  string `yaml:"password"`
-	Proto     string `yaml:"proto"`
-	CertPath  string `yaml:"pem_path"`
-	KeyPath   string `yaml:"key_path"`
+
+	// StealthEnabled answers unauthenticated and non-proxy requests like an
+	// ordinary web server instead of revealing the proxy.
+	StealthEnabled bool `yaml:"stealth_enabled"`
+	// StealthServerHeader is the Server header of stealth pages; empty omits it.
+	StealthServerHeader string `yaml:"stealth_server_header"`
+	// StealthAuthHost is a secret target hostname that still receives the 407
+	// challenge so browsers can prompt for proxy credentials.
+	StealthAuthHost string `yaml:"stealth_auth_host"`
+	Proto           string `yaml:"proto"`
+	CertPath        string `yaml:"pem_path"`
+	KeyPath         string `yaml:"key_path"`
 
 	MaxConnections           int      `yaml:"max_connections"`
 	TunnelIdleTimeoutSeconds int      `yaml:"tunnel_idle_timeout_seconds"`
@@ -73,6 +84,7 @@ type Config struct {
 func Default() Config {
 	return Config{
 		ProxyAddr:                defaultProxyAddr,
+		StealthServerHeader:      defaultStealthServerHeader,
 		Proto:                    defaultProto,
 		UpstreamsEnabled:         false,
 		UpstreamStrategy:         defaultUpstreamStrategy,
@@ -151,6 +163,9 @@ func (cfg Config) validate(opts loadOptions) error {
 
 	proxyUserSet := cfg.Username != ""
 	proxyPasswordSet := cfg.Password != ""
+	if err := validateStealth(cfg, proxyUserSet && proxyPasswordSet); err != nil {
+		validationErrors = append(validationErrors, err)
+	}
 	if proxyUserSet != proxyPasswordSet {
 		validationErrors = append(validationErrors, errors.New("username and password must either both be set or both be empty"))
 	}
@@ -262,6 +277,8 @@ func ValidateSSHHostKeyFingerprint(fingerprint string) error {
 func (cfg *Config) normalize() {
 	cfg.ProxyAddr = strings.TrimSpace(cfg.ProxyAddr)
 	cfg.Username = strings.TrimSpace(cfg.Username)
+	cfg.StealthServerHeader = strings.TrimSpace(cfg.StealthServerHeader)
+	cfg.StealthAuthHost = strings.ToLower(strings.TrimSpace(cfg.StealthAuthHost))
 	cfg.Proto = strings.ToLower(strings.TrimSpace(cfg.Proto))
 	cfg.CertPath = strings.TrimSpace(cfg.CertPath)
 	cfg.KeyPath = strings.TrimSpace(cfg.KeyPath)
@@ -331,6 +348,42 @@ func validateListenAddress(address string) error {
 		return fmt.Errorf("listen_addr port must be between 1 and 65535, got %q", portText)
 	}
 	return nil
+}
+
+// validateStealth checks stealth settings. They are ignored while stealth is
+// disabled, like upstream settings when upstreams are disabled.
+func validateStealth(cfg Config, credentialsSet bool) error {
+	if !cfg.StealthEnabled {
+		return nil
+	}
+	var stealthErrors []error
+	if len(cfg.StealthServerHeader) > maxStealthServerHeaderLength {
+		stealthErrors = append(stealthErrors, fmt.Errorf("stealth_server_header must be at most %d bytes", maxStealthServerHeaderLength))
+	}
+	if strings.ContainsFunc(cfg.StealthServerHeader, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		stealthErrors = append(stealthErrors, errors.New("stealth_server_header must not contain control characters"))
+	}
+	if cfg.StealthAuthHost != "" {
+		if !isBareHostname(cfg.StealthAuthHost) {
+			stealthErrors = append(stealthErrors, fmt.Errorf("stealth_auth_host %q must be a bare hostname without scheme, port, or path", cfg.StealthAuthHost))
+		}
+		if !credentialsSet {
+			stealthErrors = append(stealthErrors, errors.New("stealth_auth_host requires username and password"))
+		}
+	}
+	return errors.Join(stealthErrors...)
+}
+
+func isBareHostname(host string) bool {
+	if len(host) > 253 || strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") || strings.HasPrefix(host, "-") {
+		return false
+	}
+	for _, r := range host {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '.' && r != '-' {
+			return false
+		}
+	}
+	return host != ""
 }
 
 // validateKnownHostsFile requires an existing regular file, or, when

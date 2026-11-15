@@ -20,14 +20,14 @@ type tunnel struct {
 func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request, reqID uint64) {
 	if _, _, err := net.SplitHostPort(r.Host); err != nil {
 		log.Printf("[REQ-%d] Invalid CONNECT target %q: %v", reqID, r.Host, err)
-		http.Error(w, "Invalid CONNECT target", http.StatusBadRequest)
+		h.writeError(w, http.StatusBadRequest, "Invalid CONNECT target")
 		return
 	}
 
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		log.Printf("[REQ-%d] Hijacking not supported", reqID)
-		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+		h.writeError(w, http.StatusInternalServerError, "Hijacking not supported")
 		return
 	}
 
@@ -37,7 +37,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request, reqID ui
 	targetConn, err := h.outbound.DialContext(r.Context(), "tcp", r.Host)
 	if err != nil {
 		log.Printf("[REQ-%d] CONNECT dial to %s failed: %v", reqID, r.Host, err)
-		writeDialError(w, err)
+		h.writeDialError(w, err)
 		return
 	}
 
@@ -74,7 +74,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request, reqID ui
 
 	// Write the CONNECT response directly after hijacking. Calling WriteHeader
 	// before Hijack makes net/http add chunked encoding to a successful CONNECT.
-	if _, err := bufferedClient.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+	if _, err := bufferedClient.WriteString(h.connectEstablishedLine()); err != nil {
 		log.Printf("[REQ-%d] CONNECT response write failed: %v", reqID, err)
 		active.close()
 		h.unregisterTunnel(active)

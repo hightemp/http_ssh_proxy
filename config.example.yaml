@@ -4,6 +4,14 @@ username: ""
 password: ""
 proto: http
 
+# Stealth mode: answer unauthenticated and direct (non-proxy) requests with a
+# web-server-like 404 instead of 407/400. Clients must send Proxy-Authorization
+# preemptively (curl and most libraries do). Browsers first open
+# http://<stealth_auth_host>/ through the proxy to get the 407 prompt.
+# stealth_enabled: false
+# stealth_server_header: nginx        # Empty omits the Server header
+# stealth_auth_host: login.example    # Requires username and password
+
 # Resource and shutdown limits.
 max_connections: 128
 tunnel_idle_timeout_seconds: 300
