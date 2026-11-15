@@ -112,7 +112,7 @@ func Load(path string) (*Config, error) {
 func (cfg Config) Validate() error {
 	var validationErrors []error
 
-	listenHost, listenErr := validateListenAddress(cfg.ProxyAddr)
+	_, listenErr := validateListenAddress(cfg.ProxyAddr)
 	if listenErr != nil {
 		validationErrors = append(validationErrors, listenErr)
 	}
